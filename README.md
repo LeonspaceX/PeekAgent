@@ -9,7 +9,7 @@
 - 全局快捷键一键唤起或隐藏悬浮窗口
 - 基于 PySide6 + QFluentWidgets +QWebEngine 的桌面 UI，美观实用
 - 支持多会话、会话重命名、删除和自动生成标题
-- 支持 Markdown、代码高亮、TaTeX 渲染
+- 支持 Markdown、代码高亮、KaTeX 渲染
 - 支持附件输入、拖拽文件、图片输入
 - 支持 OpenAI 兼容端点和 Anthropic 兼容端点
 - 支持自动拉取模型列表，配置简单
