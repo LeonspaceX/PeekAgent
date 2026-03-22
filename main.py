@@ -1,0 +1,173 @@
+"""PeekAgent - Lightweight floating AI assistant."""
+
+import sys
+import os
+import shutil
+
+
+def _append_chromium_flag(flag: str):
+    current = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
+    flags = [item for item in current.split() if item]
+    if flag not in flags:
+        flags.append(flag)
+    if flags:
+        os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(flags)
+
+
+_append_chromium_flag("--disable-direct-composition")
+_append_chromium_flag("--disable-features=DirectComposition")
+
+# Ensure data directories exist and seed default prompt files
+from src.config import BASE_DIR, ICON_PATH, RESOURCE_DIR
+
+for d in ["data/context", "data/prompt"]:
+    (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
+
+# Copy editable prompt files if they don't exist yet
+_prompt_dir = BASE_DIR / "data" / "prompt"
+_data_dir = BASE_DIR / "data"
+_defaults = {
+    "SYSTEM.md": None,  # created inline below
+    "MEMORY.md": None,
+}
+for name, src in _defaults.items():
+    dest = _prompt_dir / name
+    if not dest.exists():
+        if src and src.exists():
+            shutil.copy2(src, dest)
+        elif name == "SYSTEM.md":
+            dest.write_text("You are PeekAgent, a helpful AI assistant. Be concise and helpful.\n", encoding="utf-8")
+        else:
+            dest.write_text("", encoding="utf-8")
+
+_highlight_dest = _data_dir / "highlight.json"
+if not _highlight_dest.exists():
+    shutil.copy2(RESOURCE_DIR / "highlight.json", _highlight_dest)
+
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
+from PySide6.QtGui import QIcon, QAction
+from PySide6.QtCore import QObject, Qt, Signal
+import keyboard
+from qfluentwidgets import setThemeColor
+
+from src.config import Settings
+from src.ui.main_window import MainWindow
+from src.ui.settings_window import SettingsWindow
+
+
+class _HotkeyBridge(QObject):
+    activated = Signal()
+
+
+class PeekAgentApp:
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        self.app.setQuitOnLastWindowClosed(False)
+
+        if ICON_PATH.exists():
+            self.app.setWindowIcon(QIcon(str(ICON_PATH)))
+
+        self.settings = Settings()
+        self.main_window = MainWindow()
+        self.settings_window = None
+        self._hotkey_handle = None
+        self._registered_hotkey = None
+        self.hotkey_bridge = _HotkeyBridge()
+        self.hotkey_bridge.activated.connect(self._toggle_window)
+
+        self._setup_tray()
+        self._setup_hotkey()
+        self._apply_theme()
+
+        self.main_window.show()
+
+    def _setup_tray(self):
+        icon = QIcon(str(ICON_PATH)) if ICON_PATH.exists() else QIcon()
+        self.tray = QSystemTrayIcon(icon)
+        self.tray.setToolTip("PeekAgent")
+
+        self.tray_menu = QMenu()
+        show_action = QAction("显示/隐藏", self.tray_menu, triggered=self._toggle_window)
+        settings_action = QAction("设置", self.tray_menu, triggered=self._open_settings)
+        quit_action = QAction("退出", self.tray_menu, triggered=self._quit)
+
+        self.tray_menu.addAction(show_action)
+        self.tray_menu.addAction(settings_action)
+        self.tray_menu.addSeparator()
+        self.tray_menu.addAction(quit_action)
+
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _setup_hotkey(self):
+        hotkey = (self.settings.get("general", "hotkey", "alt+z") or "").strip()
+        if not hotkey:
+            hotkey = "alt+z"
+        normalized = hotkey.lower()
+        if self._hotkey_handle is not None and normalized == self._registered_hotkey:
+            return
+        try:
+            new_handle = keyboard.add_hotkey(
+                hotkey,
+                self.hotkey_bridge.activated.emit,
+                suppress=(sys.platform == "win32"),
+            )
+        except Exception as exc:
+            if hasattr(self, "tray"):
+                self.tray.showMessage(
+                    "快捷键注册失败",
+                    f"`{hotkey}` 无法注册：{exc}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    5000,
+                )
+            return
+
+        if self._hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+        self._hotkey_handle = new_handle
+        self._registered_hotkey = normalized
+
+    def _toggle_window(self):
+        if self.main_window.isVisible():
+            self.main_window.hide()
+        else:
+            self.main_window.show()
+            self.main_window.activateWindow()
+            self.main_window.raise_()
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._toggle_window()
+
+    def _open_settings(self):
+        if self.settings_window is None or not self.settings_window.isVisible():
+            self.settings_window = SettingsWindow()
+            self.settings_window.settings_saved.connect(self._setup_hotkey)
+            self.settings_window.settings_saved.connect(self._apply_theme)
+            self.settings_window.reset_window_requested.connect(
+                self.main_window.reset_geometry_to_default
+            )
+        self.settings_window.show()
+        self.settings_window.activateWindow()
+
+    def _apply_theme(self):
+        primary_color = self.settings.get("appearance", "primary_theme_color", "#0ea5a4")
+        setThemeColor(primary_color)
+        self.main_window.apply_theme()
+
+    def _quit(self):
+        keyboard.unhook_all()
+        self.tray.hide()
+        self.app.quit()
+
+    def run(self) -> int:
+        return self.app.exec()
+
+
+if __name__ == "__main__":
+    app = PeekAgentApp()
+    sys.exit(app.run())

@@ -1,0 +1,7 @@
+PySide6>=6.6.0
+PySide6-Fluent-Widgets>=1.7.0
+keyboard>=0.13.5
+requests>=2.31.0
+chardet<6
+readability-lxml>=0.8.1
+markdownify>=0.13.1

@@ -1,0 +1,38 @@
+{
+  "base": {
+    "color": "#1f2937",
+    "background": "#f7f8fa",
+    "selection": "rgba(14, 165, 164, 0.18)"
+  },
+  "tokens": {
+    "keyword": "#0f5cc0",
+    "built_in": "#7c3aed",
+    "type": "#9a3412",
+    "literal": "#b42318",
+    "number": "#b42318",
+    "string": "#0f766e",
+    "regexp": "#0f766e",
+    "subst": "#1f2937",
+    "symbol": "#c2410c",
+    "class": "#7c2d12",
+    "function": "#075985",
+    "title": "#075985",
+    "params": "#475467",
+    "comment": "#667085",
+    "doctag": "#7a8699",
+    "meta": "#475467",
+    "meta-keyword": "#0f5cc0",
+    "section": "#7c2d12",
+    "tag": "#0f5cc0",
+    "name": "#0f5cc0",
+    "attr": "#b45309",
+    "attribute": "#b45309",
+    "variable": "#b93815",
+    "template-variable": "#b93815",
+    "operator": "#344054",
+    "punctuation": "#667085",
+    "bullet": "#c2410c",
+    "link": "#0f5cc0",
+    "quote": "#475467"
+  }
+}

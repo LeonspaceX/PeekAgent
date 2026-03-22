@@ -1,0 +1,89 @@
+"""Build a Windows onedir package and zip it for release publishing."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+from pathlib import Path
+
+import PyInstaller.__main__
+from PyInstaller.utils.hooks import collect_data_files
+
+
+APP_NAME = "PeekAgent"
+ARCHIVE_NAME = "PeekAgent-windows-amd64"
+ROOT_DIR = Path(__file__).resolve().parent
+DIST_DIR = ROOT_DIR / "dist"
+BUILD_DIR = ROOT_DIR / "build"
+APP_DIR = DIST_DIR / APP_NAME
+ARCHIVE_PATH = DIST_DIR / f"{ARCHIVE_NAME}.zip"
+
+
+def _data_args() -> list[str]:
+    entries: list[tuple[Path, str]] = [
+        (ROOT_DIR / "src" / "resources", "src/resources"),
+    ]
+    for icon_name in ("icon.png", "icon.ico"):
+        icon_path = ROOT_DIR / icon_name
+        if icon_path.exists():
+            entries.append((icon_path, "."))
+
+    args: list[str] = []
+    for src, dest in entries:
+        args.append(f"--add-data={src}{os.pathsep}{dest}")
+
+    for src, dest in collect_data_files("qfluentwidgets"):
+        args.append(f"--add-data={src}{os.pathsep}{dest}")
+    return args
+
+
+def _build_args() -> list[str]:
+    args = [
+        "--noconfirm",
+        "--clean",
+        "--windowed",
+        "--onedir",
+        "--name",
+        APP_NAME,
+        "--hidden-import=PySide6.QtWebEngineCore",
+        "--hidden-import=PySide6.QtWebEngineWidgets",
+        "--hidden-import=PySide6.QtWebChannel",
+    ]
+    icon_path = ROOT_DIR / "icon.ico"
+    if icon_path.exists():
+        args.extend(["--icon", str(icon_path)])
+    args.extend(_data_args())
+    args.append(str(ROOT_DIR / "main.py"))
+    return args
+
+
+def _clean() -> None:
+    shutil.rmtree(BUILD_DIR, ignore_errors=True)
+    shutil.rmtree(APP_DIR, ignore_errors=True)
+    if ARCHIVE_PATH.exists():
+        ARCHIVE_PATH.unlink()
+
+
+def _zip_dist() -> Path:
+    archive_base = DIST_DIR / ARCHIVE_NAME
+    shutil.make_archive(str(archive_base), "zip", root_dir=DIST_DIR, base_dir=APP_NAME)
+    return ARCHIVE_PATH
+
+
+def main() -> int:
+    if sys.platform != "win32":
+        raise SystemExit("build_win.py is intended to run on Windows.")
+
+    DIST_DIR.mkdir(parents=True, exist_ok=True)
+    _clean()
+    print("Building with PyInstaller...")
+    PyInstaller.__main__.run(_build_args())
+    archive_path = _zip_dist()
+    print(f"Build complete: {APP_DIR}")
+    print(f"Release archive: {archive_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

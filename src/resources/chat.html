@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="vendor/katex.min.css">
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<script src="vendor/katex.min.js"></script>
+<script src="vendor/auto-render.min.js"></script>
+<script src="vendor/markdown-it.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+<style>
+:root {
+  --primary-color: #0ea5a4;
+  --user-color: #1a73e8;
+  --ai-color: #7c3aed;
+  --bg-color: #ffffff;
+  --text-color: #1e1e1e;
+  --bubble-user: #e3f0ff;
+  --bubble-ai: #f3f0ff;
+  --code-bg: #f6f8fa;
+  --hljs-color: #1f2937;
+  --hljs-bg: #f7f8fa;
+  --hljs-selection: rgba(14, 165, 164, 0.18);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  color: var(--text-color);
+  background: var(--bg-color);
+  padding: 12px;
+  overflow-x: hidden;
+}
+
+#chat-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  max-width: 88%;
+  animation: fadeIn 0.2s ease;
+  gap: 6px;
+}
+
+.tool-message {
+  display: flex;
+  flex-direction: column;
+  max-width: 92%;
+  animation: fadeIn 0.2s ease;
+}
+
+.message.user { align-self: flex-end; }
+.message.assistant { align-self: flex-start; }
+
+.bubble {
+  padding: 10px 14px;
+  border-radius: 12px;
+  line-height: 1.6;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  min-width: 0;
+}
+
+.message.user .bubble {
+  background: var(--bubble-user);
+  border-bottom-right-radius: 4px;
+}
+
+.message.assistant .bubble {
+  background: var(--bubble-ai);
+  border-bottom-left-radius: 4px;
+}
+
+/* Markdown styles */
+.bubble p { margin: 0.4em 0; }
+.bubble p:first-child { margin-top: 0; }
+.bubble p:last-child { margin-bottom: 0; }
+
+.bubble pre {
+  background: var(--hljs-bg);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 0.5em 0;
+  font-size: 13px;
+}
+
+.bubble code {
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+}
+
+.bubble pre code.hljs,
+.bubble code.hljs {
+  display: block;
+  color: var(--hljs-color);
+  background: transparent;
+}
+
+.bubble pre code ::selection,
+.bubble pre code::selection,
+.bubble pre ::selection {
+  background: var(--hljs-selection);
+}
+
+.hljs-comment,
+.hljs-quote { color: #667085; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-meta-keyword,
+.hljs-name,
+.hljs-tag { color: #0f5cc0; }
+.hljs-built_in,
+.hljs-literal { color: #7c3aed; }
+.hljs-type,
+.hljs-section,
+.hljs-class .hljs-title { color: #9a3412; }
+.hljs-string,
+.hljs-regexp { color: #0f766e; }
+.hljs-number,
+.hljs-symbol,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-bullet { color: #b42318; }
+.hljs-function .hljs-title,
+.hljs-title.function_ { color: #075985; }
+.hljs-params,
+.hljs-meta { color: #475467; }
+.hljs-attr,
+.hljs-attribute { color: #b45309; }
+.hljs-operator,
+.hljs-punctuation { color: #344054; }
+.hljs-subst { color: var(--hljs-color); }
+
+.bubble :not(pre) > code {
+  background: var(--code-bg);
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 0.5em 0;
+  border-radius: 8px;
+}
+
+.table-scroll table {
+  border-collapse: collapse;
+  margin: 0;
+  width: max-content;
+  min-width: 100%;
+}
+
+.bubble th, .bubble td {
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.bubble th { background: var(--code-bg); }
+
+.bubble blockquote {
+  border-left: 3px solid var(--ai-color);
+  padding-left: 10px;
+  margin: 0.5em 0;
+  color: #666;
+}
+
+.bubble ul, .bubble ol { padding-left: 1.5em; margin: 0.4em 0; }
+
+.bubble img { max-width: 100%; border-radius: 8px; }
+
+.actions {
+  display: flex;
+  gap: 6px;
+  max-height: 32px;
+  opacity: 1;
+  pointer-events: auto;
+}
+.message.user .actions { justify-content: flex-end; }
+.message.assistant .actions { justify-content: flex-start; }
+
+.action-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.16s ease;
+}
+
+.action-btn:hover { background: rgba(0, 0, 0, 0.055); }
+
+.action-btn img {
+  width: 14px;
+  height: 14px;
+  opacity: 0.78;
+}
+
+.edit-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.03);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.edit-panel.hidden { display: none; }
+
+.edit-input {
+  width: 100%;
+  min-height: 88px;
+  resize: vertical;
+  border: 1px solid rgba(0, 0, 0, 0.14);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  color: var(--text-color);
+  background: #fff;
+  outline: none;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.edit-input:focus {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 16%, transparent);
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.edit-confirm, .edit-cancel {
+  min-width: 72px;
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.edit-confirm {
+  border: 1px solid var(--primary-color);
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.edit-confirm:hover {
+  background: color-mix(in srgb, var(--primary-color) 88%, black);
+}
+
+.edit-cancel {
+  border: 1px solid rgba(0, 0, 0, 0.10);
+  background: rgba(255, 255, 255, 0.98);
+  color: var(--text-color);
+}
+
+.edit-cancel:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.tool-card {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+  width: fit-content;
+  min-width: 176px;
+  max-width: 100%;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+}
+
+.tool-card.pending {
+  border-color: color-mix(in srgb, var(--primary-color) 24%, rgba(0, 0, 0, 0.08));
+}
+
+.tool-card.running {
+  border-color: color-mix(in srgb, var(--primary-color) 28%, rgba(0, 0, 0, 0.08));
+}
+
+.tool-card.success {
+  border-color: color-mix(in srgb, #2e8b57 26%, rgba(0, 0, 0, 0.08));
+  background: color-mix(in srgb, #2e8b57 4%, white);
+}
+
+.tool-card.error,
+.tool-card.denied {
+  border-color: color-mix(in srgb, #d13438 24%, rgba(0, 0, 0, 0.08));
+  background: color-mix(in srgb, #d13438 4%, white);
+}
+
+.tool-header {
+  width: 100%;
+  border: none;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-header:hover {
+  background: rgba(0, 0, 0, 0.035);
+}
+
+.tool-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.tool-title-wrap {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.tool-title {
+  font-weight: 600;
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.tool-chevron {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-right: 1.4px solid #7a8699;
+  border-bottom: 1.4px solid #7a8699;
+  transform: rotate(45deg);
+  transition: transform 0.16s ease, margin 0.16s ease;
+  margin-top: -1px;
+  margin-right: 1px;
+  opacity: 0.82;
+}
+
+.tool-card.expanded .tool-chevron {
+  transform: rotate(225deg);
+  margin-top: 3px;
+}
+
+.tool-spinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  border: 1.6px solid rgba(14, 165, 164, 0.22);
+  border-top-color: var(--primary-color);
+  animation: toolSpin 0.8s linear infinite;
+}
+
+.tool-body {
+  display: none;
+  padding: 0 10px 10px;
+  border-top: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+.tool-card.expanded .tool-body {
+  display: block;
+}
+
+.tool-detail {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  color: #334155;
+  font-size: 12.5px;
+  min-width: 240px;
+  max-width: min(560px, 68vw);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.tool-approval {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tool-approve,
+.tool-deny {
+  min-width: 72px;
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.tool-approve {
+  border: 1px solid var(--primary-color);
+  background: var(--primary-color);
+  color: #fff;
+}
+
+.tool-approve:hover {
+  background: color-mix(in srgb, var(--primary-color) 88%, black);
+}
+
+.tool-deny {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: #fff;
+  color: var(--text-color);
+}
+
+.tool-deny:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+/* KaTeX */
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes toolSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-thumb { background: #c0c0c0; border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="chat-container"></div>
+<script>
+let actionIcons = { edit: '', copy: '', refresh: '', check: '' };
+let chatBridge = null;
+
+new QWebChannel(qt.webChannelTransport, function(channel) {
+  chatBridge = channel.objects.chatBridge;
+});
+
+const md = window.markdownit({
+  html: false,
+  linkify: true,
+  typographer: true,
+  highlight: function(str, lang) {
+    if (lang && hljs.getLanguage(lang)) {
+      try { return hljs.highlight(str, {language: lang}).value; } catch(_) {}
+    }
+    try { return hljs.highlightAuto(str).value; } catch(_) {}
+    return '';
+  }
+});
+
+function stripToolMarkup(text) {
+  let display = text || '';
+  display = display.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, '');
+  return display.trim();
+}
+
+function setActionIcons(icons) {
+  actionIcons = icons || actionIcons;
+}
+
+function setHighlightTheme(theme) {
+  if (!theme || typeof theme !== 'object') {
+    return;
+  }
+  const root = document.documentElement;
+  const base = theme.base || {};
+  const tokens = theme.tokens || {};
+  if (base.color) root.style.setProperty('--hljs-color', base.color);
+  if (base.background) {
+    root.style.setProperty('--hljs-bg', base.background);
+    root.style.setProperty('--code-bg', base.background);
+  }
+  if (base.selection) root.style.setProperty('--hljs-selection', base.selection);
+
+  const tokenSelectors = {
+    comment: ['.hljs-comment'],
+    quote: ['.hljs-quote'],
+    keyword: ['.hljs-keyword'],
+    built_in: ['.hljs-built_in'],
+    type: ['.hljs-type'],
+    literal: ['.hljs-literal'],
+    number: ['.hljs-number'],
+    string: ['.hljs-string'],
+    regexp: ['.hljs-regexp'],
+    subst: ['.hljs-subst'],
+    symbol: ['.hljs-symbol'],
+    class: ['.hljs-class .hljs-title'],
+    function: ['.hljs-function .hljs-title', '.hljs-title.function_'],
+    title: ['.hljs-title'],
+    params: ['.hljs-params'],
+    doctag: ['.hljs-doctag'],
+    meta: ['.hljs-meta'],
+    'meta-keyword': ['.hljs-meta-keyword'],
+    section: ['.hljs-section'],
+    tag: ['.hljs-tag', '.hljs-selector-tag'],
+    name: ['.hljs-name'],
+    attr: ['.hljs-attr'],
+    attribute: ['.hljs-attribute'],
+    variable: ['.hljs-variable'],
+    'template-variable': ['.hljs-template-variable'],
+    operator: ['.hljs-operator'],
+    punctuation: ['.hljs-punctuation'],
+    bullet: ['.hljs-bullet'],
+    link: ['.hljs-link']
+  };
+
+  let styleEl = document.getElementById('peekagent-highlight-theme');
+  if (!styleEl) {
+    styleEl = document.createElement('style');
+    styleEl.id = 'peekagent-highlight-theme';
+    document.head.appendChild(styleEl);
+  }
+
+  const rules = [];
+  Object.entries(tokenSelectors).forEach(([key, selectors]) => {
+    const color = tokens[key];
+    if (!color) {
+      return;
+    }
+    rules.push(`${selectors.join(', ')} { color: ${color}; }`);
+  });
+  styleEl.textContent = rules.join('\n');
+}
+
+function toolIconKey(toolName) {
+  return 'tool_' + toolName;
+}
+
+function toolStatusText(status) {
+  return {
+    pending: '等待审批',
+    running: '执行中',
+    success: '已完成',
+    error: '失败',
+    denied: '已拒绝',
+  }[status] || status;
+}
+
+function createActionButton(iconKey, title, onClick) {
+  const button = document.createElement('button');
+  button.className = 'action-btn';
+  button.title = title;
+  button.type = 'button';
+  button.dataset.iconKey = iconKey;
+  button.addEventListener('click', onClick);
+  const img = document.createElement('img');
+  img.src = actionIcons[iconKey] || '';
+  img.alt = title;
+  button.appendChild(img);
+  return button;
+}
+
+function flashCopiedState(button) {
+  const img = button.querySelector('img');
+  if (!img) {
+    return;
+  }
+  const originalIconKey = button.dataset.iconKey || 'copy';
+  const originalTitle = button.title;
+  img.src = actionIcons.check || img.src;
+  img.alt = '已复制';
+  img.style.opacity = '1';
+  button.title = '已复制';
+  clearTimeout(button._copyTimer);
+  button._copyTimer = setTimeout(() => {
+    img.src = actionIcons[originalIconKey] || img.src;
+    img.alt = originalTitle;
+    img.style.opacity = '';
+    button.title = originalTitle;
+  }, 3000);
+}
+
+function createEditPanel(index, content) {
+  const panel = document.createElement('div');
+  panel.className = 'edit-panel hidden';
+
+  const input = document.createElement('textarea');
+  input.className = 'edit-input';
+  input.value = content;
+  panel.appendChild(input);
+
+  const actions = document.createElement('div');
+  actions.className = 'edit-actions';
+
+  const cancel = document.createElement('button');
+  cancel.className = 'edit-cancel';
+  cancel.type = 'button';
+  cancel.textContent = '取消';
+  cancel.addEventListener('click', () => {
+    input.value = content;
+    panel.classList.add('hidden');
+  });
+  actions.appendChild(cancel);
+
+  const confirm = document.createElement('button');
+  confirm.className = 'edit-confirm';
+  confirm.type = 'button';
+  confirm.textContent = '确定';
+  confirm.addEventListener('click', () => {
+    if (chatBridge) {
+      chatBridge.editMessage(index, input.value);
+    }
+  });
+  actions.appendChild(confirm);
+
+  panel.appendChild(actions);
+  return panel;
+}
+
+function attachMessageActions(messageEl, role, index, content) {
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  if (role === 'user') {
+    actions.appendChild(createActionButton('edit', '修改', () => {
+      const panel = messageEl.querySelector('.edit-panel');
+      if (panel) {
+        panel.classList.remove('hidden');
+      }
+    }));
+    actions.appendChild(createActionButton('copy', '复制', (event) => {
+      if (chatBridge) {
+        chatBridge.copyMessage(index);
+      }
+      flashCopiedState(event.currentTarget);
+    }));
+    messageEl.appendChild(actions);
+    messageEl.appendChild(createEditPanel(index, content));
+    return;
+  }
+
+  actions.appendChild(createActionButton('refresh', '重新生成', () => {
+    if (chatBridge) {
+      chatBridge.regenerateMessage(index);
+    }
+  }));
+  actions.appendChild(createActionButton('copy', '复制', (event) => {
+    if (chatBridge) {
+      chatBridge.copyMessage(index);
+    }
+    flashCopiedState(event.currentTarget);
+  }));
+  messageEl.appendChild(actions);
+}
+
+function renderMessage(role, content, index) {
+  const container = document.getElementById('chat-container');
+  const msgDiv = document.createElement('div');
+  msgDiv.className = 'message ' + role;
+  msgDiv.dataset.index = index;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = md.render(content);
+  wrapTables(bubble);
+  msgDiv.appendChild(bubble);
+  attachMessageActions(msgDiv, role, index, content);
+  container.appendChild(msgDiv);
+  renderMath(bubble);
+  window.scrollTo(0, document.body.scrollHeight);
+  return msgDiv;
+}
+
+function createToolCard(payload) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'tool-message assistant';
+  wrapper.dataset.toolId = payload.id;
+
+  const card = document.createElement('div');
+  card.className = 'tool-card ' + (payload.status || 'pending');
+  if (payload.expanded !== false) {
+    card.classList.add('expanded');
+  }
+
+  const header = document.createElement('button');
+  header.className = 'tool-header';
+  header.type = 'button';
+  header.addEventListener('click', () => {
+    card.classList.toggle('expanded');
+  });
+
+  const icon = document.createElement('img');
+  icon.className = 'tool-icon';
+  icon.src = actionIcons[toolIconKey(payload.toolName)] || '';
+  icon.alt = payload.title || payload.toolName;
+  header.appendChild(icon);
+
+  const titleWrap = document.createElement('div');
+  titleWrap.className = 'tool-title-wrap';
+
+  const title = document.createElement('div');
+  title.className = 'tool-title';
+  title.textContent = payload.title || payload.toolName;
+  titleWrap.appendChild(title);
+  header.appendChild(titleWrap);
+
+  if (payload.status === 'running') {
+    const spinner = document.createElement('div');
+    spinner.className = 'tool-spinner';
+    header.appendChild(spinner);
+  } else {
+    const chevron = document.createElement('div');
+    chevron.className = 'tool-chevron';
+    header.appendChild(chevron);
+  }
+
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+
+  const detail = document.createElement('div');
+  detail.className = 'tool-detail';
+  detail.textContent = payload.detail || '';
+  body.appendChild(detail);
+
+  if (payload.requiresApproval && payload.status === 'pending') {
+    const approval = document.createElement('div');
+    approval.className = 'tool-approval';
+
+    const deny = document.createElement('button');
+    deny.className = 'tool-deny';
+    deny.type = 'button';
+    deny.textContent = '拒绝';
+    deny.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (chatBridge) {
+        chatBridge.denyTool(payload.id);
+      }
+    });
+    approval.appendChild(deny);
+
+    const approve = document.createElement('button');
+    approve.className = 'tool-approve';
+    approve.type = 'button';
+    approve.textContent = '执行';
+    approve.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (chatBridge) {
+        chatBridge.approveTool(payload.id);
+      }
+    });
+    approval.appendChild(approve);
+
+    body.appendChild(approval);
+  }
+
+  card.appendChild(body);
+  wrapper.appendChild(card);
+  return wrapper;
+}
+
+function renderToolMessage(payload) {
+  const container = document.getElementById('chat-container');
+  const card = createToolCard(payload);
+  container.appendChild(card);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function updateToolMessage(payload) {
+  const existing = document.querySelector(`[data-tool-id="${payload.id}"]`);
+  if (!existing) {
+    renderToolMessage(payload);
+    return;
+  }
+  const expanded = existing.querySelector('.tool-card')?.classList.contains('expanded');
+  if (typeof payload.expanded === 'undefined') {
+    payload.expanded = expanded;
+  }
+  const replacement = createToolCard(payload);
+  existing.replaceWith(replacement);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function renderMath(el) {
+  renderMathInElement(el, {
+    delimiters: [
+      {left: '$$', right: '$$', display: true},
+      {left: '$', right: '$', display: false},
+      {left: '\\[', right: '\\]', display: true},
+      {left: '\\(', right: '\\)', display: false},
+    ],
+    throwOnError: false,
+  });
+}
+
+function wrapTables(root) {
+  if (!root) {
+    return;
+  }
+  root.querySelectorAll('table').forEach((table) => {
+    if (table.parentElement && table.parentElement.classList.contains('table-scroll')) {
+      return;
+    }
+    const wrapper = document.createElement('div');
+    wrapper.className = 'table-scroll';
+    table.parentNode.insertBefore(wrapper, table);
+    wrapper.appendChild(table);
+  });
+}
+
+/* Streaming support */
+let _streamDiv = null;
+let _streamBubble = null;
+let _streamText = '';
+let _streamIndex = -1;
+let _streamRenderTimer = null;
+
+function renderStreamContent(force = false) {
+  if (!_streamBubble) {
+    return;
+  }
+  if (!force && _streamRenderTimer) {
+    return;
+  }
+  const doRender = () => {
+    _streamRenderTimer = null;
+    if (!_streamBubble) {
+      return;
+    }
+    const displayText = stripToolMarkup(_streamText);
+    _streamBubble.style.whiteSpace = '';
+    _streamBubble.innerHTML = md.render(displayText);
+    wrapTables(_streamBubble);
+    renderMath(_streamBubble);
+    window.scrollTo(0, document.body.scrollHeight);
+  };
+  if (force) {
+    doRender();
+  } else {
+    _streamRenderTimer = setTimeout(doRender, 100);
+  }
+}
+
+function startStream(index) {
+  _streamText = '';
+  _streamIndex = index;
+  if (_streamRenderTimer) {
+    clearTimeout(_streamRenderTimer);
+    _streamRenderTimer = null;
+  }
+  const container = document.getElementById('chat-container');
+  _streamDiv = document.createElement('div');
+  _streamDiv.className = 'message assistant';
+  _streamDiv.dataset.index = index;
+  _streamBubble = document.createElement('div');
+  _streamBubble.className = 'bubble';
+  _streamBubble.innerHTML = '';
+  _streamDiv.appendChild(_streamBubble);
+  container.appendChild(_streamDiv);
+}
+
+function appendToken(token) {
+  _streamText += token;
+  renderStreamContent(false);
+}
+
+function finishStream() {
+  if (_streamBubble && _streamDiv) {
+    const displayText = stripToolMarkup(_streamText);
+    if (_streamRenderTimer) {
+      clearTimeout(_streamRenderTimer);
+      _streamRenderTimer = null;
+    }
+    if (displayText) {
+      renderStreamContent(true);
+      attachMessageActions(_streamDiv, 'assistant', _streamIndex, displayText);
+    } else {
+      _streamDiv.remove();
+    }
+  }
+  _streamDiv = null;
+  _streamBubble = null;
+  _streamText = '';
+  _streamIndex = -1;
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function clearChat() {
+  document.getElementById('chat-container').innerHTML = '';
+}
+
+function setTheme(primaryColor, userColor, aiColor) {
+  document.documentElement.style.setProperty('--primary-color', primaryColor);
+  document.documentElement.style.setProperty('--user-color', userColor);
+  document.documentElement.style.setProperty('--ai-color', aiColor);
+  document.documentElement.style.setProperty('--bubble-user', userColor + '18');
+  document.documentElement.style.setProperty('--bubble-ai', aiColor + '18');
+}
+</script>
+</body>
+</html>
