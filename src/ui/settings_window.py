@@ -1,5 +1,6 @@
 """Settings window – Phase 1: General + Appearance + Model + About."""
 
+import ctypes
 import json
 import math
 import requests
@@ -7,7 +8,7 @@ import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QColor, QIntValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget,
     QFormLayout, QFrame, QButtonGroup, QFileDialog, QScrollArea,
@@ -15,10 +16,12 @@ from PySide6.QtWidgets import (
 from qfluentwidgets import (
     LineEdit, ComboBox, PushButton, ToolButton, FluentIcon,
     SwitchButton, SubtitleLabel, StrongBodyLabel, BodyLabel, InfoBar, InfoBarPosition,
-    ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar,
+    ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, isDarkTheme,
 )
-from src.config import Settings, PROMPT_DIR, HIGHLIGHT_THEME_PATH, RESOURCE_DIR
+from src.config import Settings, PROMPT_DIR, HIGHLIGHT_THEME_PATH, RESOURCE_DIR, detect_system_dark_mode
 from src.llm_client import LLMClient
+from src.ui.highlight_preview import HighlightPreview
+from src.startup_manager import request_auto_start_update
 
 
 class _AsyncWorker(QThread):
@@ -41,15 +44,20 @@ class _AsyncWorker(QThread):
 class SettingsWindow(QWidget):
     settings_saved = Signal()
     reset_window_requested = Signal()
+    always_on_top_changed = Signal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = Settings()
+        self._loading_values = False
+        self._changing_auto_start = False
+        self.setObjectName("settingsWindow")
         self.setWindowTitle("PeekAgent 设置")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(600, 450)
         self._init_ui()
         self._load_values()
+        self.apply_theme()
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
@@ -80,6 +88,7 @@ class SettingsWindow(QWidget):
         self.stack.setCurrentIndex(index)
 
     def _wrap_scroll(self, page: QWidget) -> QScrollArea:
+        page.setObjectName("settingsPage")
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -87,8 +96,58 @@ class SettingsWindow(QWidget):
         scroll.setWidget(page)
         return scroll
 
+    def apply_theme(self, dark_mode: bool | None = None):
+        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
+        window_bg = "#202020" if dark_mode else "#fafafa"
+        text_color = "#f3f3f3" if dark_mode else "#202020"
+        border_color = "rgba(255, 255, 255, 0.08)" if dark_mode else "rgba(0, 0, 0, 0.06)"
+        self.setStyleSheet(f"""
+            #settingsWindow {{
+                background: {window_bg};
+            }}
+            QWidget#settingsPage {{
+                background: transparent;
+            }}
+            QStackedWidget {{
+                background: transparent;
+            }}
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollArea > QWidget > QWidget {{
+                background: transparent;
+            }}
+            QLabel {{
+                color: {text_color};
+            }}
+            QFrame {{
+                border-color: {border_color};
+            }}
+        """)
+        self.highlight_preview.apply_theme(dark_mode)
+        self._apply_native_title_bar_theme(dark_mode)
+        self.update()
+
+    def _apply_native_title_bar_theme(self, dark_mode: bool):
+        if not hasattr(ctypes, "windll"):
+            return
+        try:
+            hwnd = int(self.winId())
+            value = ctypes.c_int(1 if dark_mode else 0)
+            for attribute in (20, 19):
+                ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd,
+                    attribute,
+                    ctypes.byref(value),
+                    ctypes.sizeof(value),
+                )
+        except Exception:
+            pass
+
     def _build_general_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         form = QFormLayout(page)
         form.setContentsMargins(20, 20, 20, 20)
         form.setSpacing(12)
@@ -101,9 +160,11 @@ class SettingsWindow(QWidget):
 
         self.auto_start_switch = SwitchButton(self)
         form.addRow("开机自启:", self.auto_start_switch)
+        self.auto_start_switch.checkedChanged.connect(self._on_auto_start_changed)
 
         self.always_top_switch = SwitchButton(self)
         form.addRow("窗口置顶:", self.always_top_switch)
+        self.always_top_switch.checkedChanged.connect(self._on_always_on_top_changed)
 
         self.reset_window_btn = PushButton("重置窗口位置与大小", self)
         self.reset_window_btn.clicked.connect(self._reset_window_geometry)
@@ -116,23 +177,35 @@ class SettingsWindow(QWidget):
 
     def _build_appearance_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         form = QFormLayout(page)
         form.setContentsMargins(20, 20, 20, 20)
         form.setSpacing(12)
 
         form.addRow(SubtitleLabel("外观设置"))
 
-        self.primary_theme_color_edit = LineEdit(self)
-        self.primary_theme_color_edit.setPlaceholderText("#0ea5a4")
-        form.addRow("主要主题色:", self.primary_theme_color_edit)
+        self.theme_mode_combo = ComboBox(self)
+        self.theme_mode_combo.addItems(["跟随系统", "浅色模式", "深色模式"])
+        self.theme_mode_combo.currentIndexChanged.connect(self._on_theme_mode_changed)
+        form.addRow("界面主题:", self.theme_mode_combo)
 
-        self.theme_color1_edit = LineEdit(self)
-        self.theme_color1_edit.setPlaceholderText("#1a73e8")
-        form.addRow("用户气泡色:", self.theme_color1_edit)
+        primary_color_row, self.primary_theme_color_button, self.primary_theme_color_label = self._create_color_picker_row(
+            "主要主题色",
+            "#0ea5a4",
+        )
+        form.addRow("主要主题色:", primary_color_row)
 
-        self.theme_color2_edit = LineEdit(self)
-        self.theme_color2_edit.setPlaceholderText("#7c3aed")
-        form.addRow("AI 气泡色:", self.theme_color2_edit)
+        user_color_row, self.theme_color1_button, self.theme_color1_label = self._create_color_picker_row(
+            "用户气泡色",
+            "#1a73e8",
+        )
+        form.addRow("用户气泡色:", user_color_row)
+
+        ai_color_row, self.theme_color2_button, self.theme_color2_label = self._create_color_picker_row(
+            "AI 气泡色",
+            "#7c3aed",
+        )
+        form.addRow("AI 气泡色:", ai_color_row)
 
         highlight_row = QHBoxLayout()
         highlight_row.setSpacing(8)
@@ -145,10 +218,105 @@ class SettingsWindow(QWidget):
         highlight_row.addWidget(self.restore_highlight_btn)
         form.addRow("代码高亮主题:", highlight_row)
 
+        self.highlight_preview = HighlightPreview(self)
+        self.highlight_preview.setMinimumHeight(220)
+        self.highlight_preview.setMaximumHeight(220)
+        form.addRow(self.highlight_preview)
+
         return page
+
+    def _create_color_picker_row(self, title: str, default_color: str) -> tuple[QWidget, ColorPickerButton, BodyLabel]:
+        row = QWidget(self)
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+
+        button = ColorPickerButton(QColor(default_color), title, row)
+        label = BodyLabel(default_color, row)
+        label.setMinimumWidth(72)
+
+        layout.addWidget(button)
+        layout.addWidget(label)
+        layout.addStretch(1)
+
+        button.colorChanged.connect(lambda color, value_label=label: value_label.setText(color.name()))
+        return row, button, label
+
+    @staticmethod
+    def _normalize_color(value: str, fallback: str) -> QColor:
+        color = QColor(value)
+        if not color.isValid():
+            color = QColor(fallback)
+        return color
+
+    def _set_color_picker_value(
+        self,
+        button: ColorPickerButton,
+        label: BodyLabel,
+        value: str,
+        fallback: str,
+    ):
+        color = self._normalize_color(value, fallback)
+        button.setColor(color)
+        label.setText(color.name())
+
+    @staticmethod
+    def _color_picker_value(button: ColorPickerButton) -> str:
+        return QColor(button.color).name()
+
+    def _refresh_highlight_preview(self):
+        self.highlight_preview.apply_highlight_theme()
+
+    def _theme_mode_value(self) -> str:
+        return {
+            0: "auto",
+            1: "light",
+            2: "dark",
+        }.get(self.theme_mode_combo.currentIndex(), "light")
+
+    def _set_theme_mode_value(self, value: str):
+        index = {
+            "auto": 0,
+            "light": 1,
+            "dark": 2,
+        }.get((value or "light").strip().lower(), 1)
+        self.theme_mode_combo.setCurrentIndex(index)
+
+    def _default_highlight_theme_path(self) -> Path:
+        theme_mode = self._theme_mode_value()
+        use_dark = theme_mode == "dark" or (theme_mode == "auto" and detect_system_dark_mode())
+        return RESOURCE_DIR / ("highlight_dark.json" if use_dark else "highlight.json")
+
+    @staticmethod
+    def _load_json_file(path: Path) -> dict | None:
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _maybe_sync_default_highlight_theme(self):
+        target_path = self._default_highlight_theme_path()
+        current_theme = self._load_json_file(HIGHLIGHT_THEME_PATH)
+        target_theme = self._load_json_file(target_path)
+        if current_theme is None or target_theme is None:
+            return
+        if current_theme == target_theme:
+            return
+
+        light_theme = self._load_json_file(RESOURCE_DIR / "highlight.json")
+        dark_theme = self._load_json_file(RESOURCE_DIR / "highlight_dark.json")
+        if current_theme != light_theme and current_theme != dark_theme:
+            return
+
+        HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target_path, HIGHLIGHT_THEME_PATH)
 
     def _build_model_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         form = QFormLayout(page)
         form.setContentsMargins(20, 20, 20, 20)
         form.setSpacing(12)
@@ -214,6 +382,7 @@ class SettingsWindow(QWidget):
 
     def _build_tavily_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -251,6 +420,7 @@ class SettingsWindow(QWidget):
 
     def _build_tools_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         form = QFormLayout(page)
         form.setContentsMargins(20, 20, 20, 20)
         form.setSpacing(16)
@@ -262,9 +432,6 @@ class SettingsWindow(QWidget):
 
         self.search_switch = SwitchButton(self)
         form.addRow("搜索文本:", self.search_switch)
-
-        self.find_switch = SwitchButton(self)
-        form.addRow("查找界面元素:", self.find_switch)
 
         self.capture_switch = SwitchButton(self)
         form.addRow("截图:", self.capture_switch)
@@ -287,21 +454,6 @@ class SettingsWindow(QWidget):
         self.command_mode_group, command_row = self._create_mode_row()
         form.addRow("执行命令:", command_row)
 
-        self.click_mode_group, click_row = self._create_mode_row()
-        form.addRow("点击:", click_row)
-
-        self.scroll_mode_group, scroll_row = self._create_mode_row()
-        form.addRow("滚动:", scroll_row)
-
-        self.input_mode_group, input_row = self._create_mode_row()
-        form.addRow("输入文本:", input_row)
-
-        self.press_mode_group, press_row = self._create_mode_row()
-        form.addRow("按键:", press_row)
-
-        self.select_mode_group, select_row = self._create_mode_row()
-        form.addRow("拖拽选择:", select_row)
-
         self.web_fetch_mode_group, web_fetch_row = self._create_mode_row()
         form.addRow("抓取网页:", web_fetch_row)
 
@@ -309,6 +461,11 @@ class SettingsWindow(QWidget):
         self.command_output_limit_edit.setPlaceholderText("12000")
         self.command_output_limit_edit.setValidator(QIntValidator(100, 1000000, self))
         form.addRow("命令输出截断长度:", self.command_output_limit_edit)
+
+        self.auto_tool_round_limit_edit = LineEdit(self)
+        self.auto_tool_round_limit_edit.setPlaceholderText("8")
+        self.auto_tool_round_limit_edit.setValidator(QIntValidator(1, 1000, self))
+        form.addRow("自动工具调用上限:", self.auto_tool_round_limit_edit)
         return page
 
     def _create_mode_row(self):
@@ -334,6 +491,7 @@ class SettingsWindow(QWidget):
     def _build_prompt_page(self) -> QWidget:
         from qfluentwidgets import PlainTextEdit
         page = QWidget()
+        page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -384,6 +542,7 @@ class SettingsWindow(QWidget):
 
     def _build_about_page(self) -> QWidget:
         page = QWidget()
+        page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
@@ -395,62 +554,83 @@ class SettingsWindow(QWidget):
 
         return page
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._apply_native_title_bar_theme(isDarkTheme())
+
     # --- Load / Save ---
 
     def _load_values(self):
         s = self.settings
-        self.hotkey_edit.setText(s.get("general", "hotkey", "alt+z"))
-        self.auto_start_switch.setChecked(s.get("general", "auto_start", False))
-        self.always_top_switch.setChecked(s.get("general", "always_on_top", True))
-        self.external_prompt_editor_switch.setChecked(
-            s.get("general", "external_prompt_editor_enabled", False)
-        )
+        self._loading_values = True
+        try:
+            self.hotkey_edit.setText(s.get("general", "hotkey", "alt+z"))
+            self.auto_start_switch.setChecked(s.get("general", "auto_start", False))
+            self.always_top_switch.setChecked(s.get("general", "always_on_top", True))
+            self.external_prompt_editor_switch.setChecked(
+                s.get("general", "external_prompt_editor_enabled", False)
+            )
 
-        self.primary_theme_color_edit.setText(s.get("appearance", "primary_theme_color", "#0ea5a4"))
-        self.theme_color1_edit.setText(s.get("appearance", "theme_color_1", "#1a73e8"))
-        self.theme_color2_edit.setText(s.get("appearance", "theme_color_2", "#7c3aed"))
+            self._set_color_picker_value(
+                self.primary_theme_color_button,
+                self.primary_theme_color_label,
+                s.get("appearance", "primary_theme_color", "#0ea5a4"),
+                "#0ea5a4",
+            )
+            self._set_theme_mode_value(s.get("appearance", "theme_mode", "light"))
+            self._set_color_picker_value(
+                self.theme_color1_button,
+                self.theme_color1_label,
+                s.get("appearance", "theme_color_1", "#1a73e8"),
+                "#1a73e8",
+            )
+            self._set_color_picker_value(
+                self.theme_color2_button,
+                self.theme_color2_label,
+                s.get("appearance", "theme_color_2", "#7c3aed"),
+                "#7c3aed",
+            )
+            self._maybe_sync_default_highlight_theme()
+            self._refresh_highlight_preview()
 
-        self.endpoint_url_edit.setText(s.get("model", "endpoint_url", ""))
-        self.api_key_edit.setText(s.get("model", "api_key", ""))
-        endpoint_type = s.get("model", "endpoint_type", "openai")
-        self.openai_radio.setChecked(endpoint_type != "anthropic")
-        self.anthropic_radio.setChecked(endpoint_type == "anthropic")
-        model = s.get("model", "model_name", "")
-        if model:
-            self.model_combo.addItem(model)
-            self.model_combo.setCurrentText(model)
-            self.model_edit.setText(model)
-        self._set_manual_model_input(False)
-        self.stream_switch.setChecked(s.get("model", "stream", True))
-        self.read_switch.setChecked(s.get("tools", "read_enabled", True))
-        self.search_switch.setChecked(s.get("tools", "search_enabled", True))
-        self.find_switch.setChecked(s.get("tools", "find_enabled", True))
-        self.capture_switch.setChecked(s.get("tools", "capture_enabled", True))
-        self.web_search_switch.setChecked(s.get("tools", "web_search_enabled", True))
-        self.clipboard_switch.setChecked(s.get("tools", "clipboard_enabled", True))
-        self.tavily_api_key_edit.setText(s.get("integrations", "tavily_api_key", ""))
-        self._set_mode_group(self.write_mode_group, s.get("tools", "write_mode", "manual"))
-        self._set_mode_group(self.add_mode_group, s.get("tools", "add_mode", "manual"))
-        self._set_mode_group(self.replace_mode_group, s.get("tools", "replace_mode", "manual"))
-        self._set_mode_group(self.command_mode_group, s.get("tools", "command_mode", "manual"))
-        self._set_mode_group(self.click_mode_group, s.get("tools", "click_mode", "manual"))
-        self._set_mode_group(self.scroll_mode_group, s.get("tools", "scroll_mode", "manual"))
-        self._set_mode_group(self.input_mode_group, s.get("tools", "input_mode", "manual"))
-        self._set_mode_group(self.press_mode_group, s.get("tools", "press_mode", "manual"))
-        self._set_mode_group(self.select_mode_group, s.get("tools", "select_mode", "manual"))
-        self._set_mode_group(self.web_fetch_mode_group, s.get("tools", "web_fetch_mode", "manual"))
-        self.command_output_limit_edit.setText(str(s.get("tools", "command_output_limit", 12000)))
+            self.endpoint_url_edit.setText(s.get("model", "endpoint_url", ""))
+            self.api_key_edit.setText(s.get("model", "api_key", ""))
+            endpoint_type = s.get("model", "endpoint_type", "openai")
+            self.openai_radio.setChecked(endpoint_type != "anthropic")
+            self.anthropic_radio.setChecked(endpoint_type == "anthropic")
+            model = s.get("model", "model_name", "")
+            if model:
+                self.model_combo.addItem(model)
+                self.model_combo.setCurrentText(model)
+                self.model_edit.setText(model)
+            self._set_manual_model_input(False)
+            self.stream_switch.setChecked(s.get("model", "stream", True))
+            self.read_switch.setChecked(s.get("tools", "read_enabled", True))
+            self.search_switch.setChecked(s.get("tools", "search_enabled", True))
+            self.capture_switch.setChecked(s.get("tools", "capture_enabled", True))
+            self.web_search_switch.setChecked(s.get("tools", "web_search_enabled", True))
+            self.clipboard_switch.setChecked(s.get("tools", "clipboard_enabled", True))
+            self.tavily_api_key_edit.setText(s.get("integrations", "tavily_api_key", ""))
+            self._set_mode_group(self.write_mode_group, s.get("tools", "write_mode", "manual"))
+            self._set_mode_group(self.add_mode_group, s.get("tools", "add_mode", "manual"))
+            self._set_mode_group(self.replace_mode_group, s.get("tools", "replace_mode", "manual"))
+            self._set_mode_group(self.command_mode_group, s.get("tools", "command_mode", "manual"))
+            self._set_mode_group(self.web_fetch_mode_group, s.get("tools", "web_fetch_mode", "manual"))
+            self.command_output_limit_edit.setText(str(s.get("tools", "command_output_limit", 12000)))
+            self.auto_tool_round_limit_edit.setText(str(s.get("tools", "auto_tool_round_limit", 8)))
+        finally:
+            self._loading_values = False
 
     def _save_values(self):
         s = self.settings
         s.set("general", "hotkey", self.hotkey_edit.text())
-        s.set("general", "auto_start", self.auto_start_switch.isChecked())
         s.set("general", "always_on_top", self.always_top_switch.isChecked())
         s.set("general", "external_prompt_editor_enabled", self.external_prompt_editor_switch.isChecked())
 
-        s.set("appearance", "primary_theme_color", self.primary_theme_color_edit.text())
-        s.set("appearance", "theme_color_1", self.theme_color1_edit.text())
-        s.set("appearance", "theme_color_2", self.theme_color2_edit.text())
+        s.set("appearance", "theme_mode", self._theme_mode_value())
+        s.set("appearance", "primary_theme_color", self._color_picker_value(self.primary_theme_color_button))
+        s.set("appearance", "theme_color_1", self._color_picker_value(self.theme_color1_button))
+        s.set("appearance", "theme_color_2", self._color_picker_value(self.theme_color2_button))
 
         s.set("model", "endpoint_url", self.endpoint_url_edit.text())
         s.set("model", "api_key", self.api_key_edit.text())
@@ -459,7 +639,6 @@ class SettingsWindow(QWidget):
         s.set("model", "stream", self.stream_switch.isChecked())
         s.set("tools", "read_enabled", self.read_switch.isChecked())
         s.set("tools", "search_enabled", self.search_switch.isChecked())
-        s.set("tools", "find_enabled", self.find_switch.isChecked())
         s.set("tools", "capture_enabled", self.capture_switch.isChecked())
         s.set("tools", "web_search_enabled", self.web_search_switch.isChecked())
         s.set("tools", "clipboard_enabled", self.clipboard_switch.isChecked())
@@ -468,13 +647,9 @@ class SettingsWindow(QWidget):
         s.set("tools", "add_mode", self._mode_group_value(self.add_mode_group))
         s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group))
         s.set("tools", "command_mode", self._mode_group_value(self.command_mode_group))
-        s.set("tools", "click_mode", self._mode_group_value(self.click_mode_group))
-        s.set("tools", "scroll_mode", self._mode_group_value(self.scroll_mode_group))
-        s.set("tools", "input_mode", self._mode_group_value(self.input_mode_group))
-        s.set("tools", "press_mode", self._mode_group_value(self.press_mode_group))
-        s.set("tools", "select_mode", self._mode_group_value(self.select_mode_group))
         s.set("tools", "web_fetch_mode", self._mode_group_value(self.web_fetch_mode_group))
         s.set("tools", "command_output_limit", self._command_output_limit_value())
+        s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value())
 
     def _import_highlight_theme(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -498,20 +673,62 @@ class SettingsWindow(QWidget):
 
         HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(file_path, HIGHLIGHT_THEME_PATH)
+        self.highlight_preview.apply_highlight_theme()
         InfoBar.success("导入成功", "已覆盖 data/highlight.json", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
         self.settings_saved.emit()
 
     def _restore_default_highlight_theme(self):
-        default_theme_path = RESOURCE_DIR / "highlight.json"
+        default_theme_path = self._default_highlight_theme_path()
         if not default_theme_path.exists():
             InfoBar.error("恢复失败", "默认高亮主题不存在", parent=self,
                           position=InfoBarPosition.TOP, duration=5000)
             return
         HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(default_theme_path, HIGHLIGHT_THEME_PATH)
+        self.highlight_preview.apply_highlight_theme()
         InfoBar.success("恢复成功", "已恢复默认高亮主题", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
+        self.settings_saved.emit()
+
+    def _on_auto_start_changed(self, checked: bool):
+        if self._loading_values or self._changing_auto_start:
+            return
+        try:
+            request_auto_start_update(checked)
+        except Exception as exc:
+            self._changing_auto_start = True
+            try:
+                self.auto_start_switch.setChecked(not checked)
+            finally:
+                self._changing_auto_start = False
+            InfoBar.error("开机自启更新失败", str(exc), parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
+
+        self.settings.set("general", "auto_start", checked)
+        self.settings_saved.emit()
+        InfoBar.success(
+            "开机自启已更新",
+            "已启用开机自启" if checked else "已关闭开机自启",
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+        )
+
+    def _on_always_on_top_changed(self, checked: bool):
+        if self._loading_values:
+            return
+        self.settings.set("general", "always_on_top", checked)
+        self.always_on_top_changed.emit(checked)
+        self.settings_saved.emit()
+
+    def _on_theme_mode_changed(self):
+        if self._loading_values:
+            return
+        self.settings.set("appearance", "theme_mode", self._theme_mode_value())
+        self._maybe_sync_default_highlight_theme()
+        self.highlight_preview.apply_theme(isDarkTheme())
         self.settings_saved.emit()
 
     def _refresh_tavily_usage(self):
@@ -691,6 +908,16 @@ class SettingsWindow(QWidget):
         except ValueError:
             return 12000
         return max(100, value)
+
+    def _auto_tool_round_limit_value(self) -> int:
+        text = self.auto_tool_round_limit_edit.text().strip()
+        if not text:
+            return 8
+        try:
+            value = int(text)
+        except ValueError:
+            return 8
+        return max(1, value)
 
     @staticmethod
     def _format_tavily_usage_value(value) -> str:

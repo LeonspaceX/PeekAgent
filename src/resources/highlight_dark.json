@@ -1,0 +1,38 @@
+{
+  "base": {
+    "color": "#d6deeb",
+    "background": "#0f1720",
+    "selection": "rgba(56, 189, 248, 0.28)"
+  },
+  "tokens": {
+    "keyword": "#7dd3fc",
+    "built_in": "#c084fc",
+    "type": "#fdba74",
+    "literal": "#fda4af",
+    "number": "#fda4af",
+    "string": "#86efac",
+    "regexp": "#86efac",
+    "subst": "#d6deeb",
+    "symbol": "#fb7185",
+    "class": "#fdba74",
+    "function": "#93c5fd",
+    "title": "#93c5fd",
+    "params": "#cbd5e1",
+    "comment": "#94a3b8",
+    "doctag": "#94a3b8",
+    "meta": "#cbd5e1",
+    "meta-keyword": "#7dd3fc",
+    "section": "#fdba74",
+    "tag": "#7dd3fc",
+    "name": "#7dd3fc",
+    "attr": "#fbbf24",
+    "attribute": "#fbbf24",
+    "variable": "#fda4af",
+    "template-variable": "#fda4af",
+    "operator": "#cbd5e1",
+    "punctuation": "#94a3b8",
+    "bullet": "#f97316",
+    "link": "#7dd3fc",
+    "quote": "#cbd5e1"
+  }
+}

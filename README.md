@@ -14,7 +14,7 @@
 - 支持 OpenAI 兼容端点和 Anthropic 兼容端点
 - 支持自动拉取模型列表，配置简单
 - 内置基础 Agent 工具：读文件、搜索文本、写入/追加/替换文件、PowerShell 命令、截图、网页抓取、网页搜索、剪贴板
-- 支持实用 Tavily api 进行联网搜索
+- 支持使用 Tavily api 进行联网搜索
 
 ## 依赖
 
@@ -26,7 +26,7 @@
 1. 通过源码运行
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/LeonspaceX/PeekAgent
 cd PeekAgent
 pip install -r requirements.txt
 python main.py
@@ -69,7 +69,7 @@ PeekAgent 当前支持两类端点：
 - 端点 URL
 - API Key
 - 端点类型
-- 模型列表拉取与手动填写 fallback
+- 模型名称
 - 流式输出开关
 
 ## Agent 工具
@@ -79,7 +79,7 @@ PeekAgent 当前支持两类端点：
 - `read`：读取文本文件、图片文件或目录
 - `search`：在文件或目录中搜索文本
 - `write` / `add` / `replace`：写入、追加、精确替换文件内容
-- `command`：在 PowerShell 中执行命令，支持上下文终端
+- `command`：在 PowerShell 中执行命令
 - `capture`：截图当前屏幕
 - `web-search`：通过 Tavily 搜索网页结果
 - `web-fetch`：抓取网页正文并转换为 Markdown
@@ -96,15 +96,6 @@ PeekAgent 当前支持两类端点：
 - 模型设置：端点、模型、连接测试
 - Tavily 设置：API Key、套餐和用量刷新
 - 工具设置：文件、命令、截图、联网搜索、剪贴板等能力开关和模式
-
-## 数据目录
-
-项目当前仍然使用程序根目录下的 `./data`：
-
-- 源码运行时，使用仓库根目录下的 `./data`
-- PyInstaller `onedir` 运行时，使用可执行程序所在目录下的 `./data`
-
-这意味着打包后的程序目录需要可写。
 
 ## 打包
 

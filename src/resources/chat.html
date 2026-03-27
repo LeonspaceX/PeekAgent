@@ -21,6 +21,44 @@
   --hljs-color: #1f2937;
   --hljs-bg: #f7f8fa;
   --hljs-selection: rgba(14, 165, 164, 0.18);
+  --panel-bg: rgba(0, 0, 0, 0.03);
+  --panel-border: rgba(0, 0, 0, 0.06);
+  --input-bg: #ffffff;
+  --input-border: rgba(0, 0, 0, 0.14);
+  --secondary-button-bg: rgba(255, 255, 255, 0.98);
+  --secondary-button-hover: rgba(0, 0, 0, 0.04);
+  --tool-card-bg: #ffffff;
+  --tool-card-border: rgba(0, 0, 0, 0.08);
+  --tool-card-hover: rgba(0, 0, 0, 0.035);
+  --tool-body-border: rgba(0, 0, 0, 0.05);
+  --tool-detail-color: #334155;
+  --blockquote-color: #666666;
+  --table-border: #dddddd;
+  --action-hover: rgba(0, 0, 0, 0.055);
+  --scrollbar-thumb: #c0c0c0;
+}
+
+:root[data-theme="dark"] {
+  --bg-color: #181818;
+  --text-color: #e7e7e7;
+  --code-bg: #1b1f24;
+  --hljs-color: #d6deeb;
+  --hljs-bg: #0f1720;
+  --panel-bg: rgba(255, 255, 255, 0.05);
+  --panel-border: rgba(255, 255, 255, 0.08);
+  --input-bg: #202020;
+  --input-border: rgba(255, 255, 255, 0.16);
+  --secondary-button-bg: #262626;
+  --secondary-button-hover: rgba(255, 255, 255, 0.08);
+  --tool-card-bg: #202020;
+  --tool-card-border: rgba(255, 255, 255, 0.10);
+  --tool-card-hover: rgba(255, 255, 255, 0.06);
+  --tool-body-border: rgba(255, 255, 255, 0.08);
+  --tool-detail-color: #cbd5e1;
+  --blockquote-color: #a3a3a3;
+  --table-border: rgba(255, 255, 255, 0.12);
+  --action-hover: rgba(255, 255, 255, 0.08);
+  --scrollbar-thumb: #4a4a4a;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -162,7 +200,7 @@ body {
 }
 
 .bubble th, .bubble td {
-  border: 1px solid #ddd;
+  border: 1px solid var(--table-border);
   padding: 6px 10px;
   text-align: left;
   white-space: nowrap;
@@ -174,7 +212,7 @@ body {
   border-left: 3px solid var(--ai-color);
   padding-left: 10px;
   margin: 0.5em 0;
-  color: #666;
+  color: var(--blockquote-color);
 }
 
 .bubble ul, .bubble ol { padding-left: 1.5em; margin: 0.4em 0; }
@@ -204,7 +242,7 @@ body {
   transition: background 0.16s ease;
 }
 
-.action-btn:hover { background: rgba(0, 0, 0, 0.055); }
+.action-btn:hover { background: var(--action-hover); }
 
 .action-btn img {
   width: 14px;
@@ -218,8 +256,8 @@ body {
   gap: 8px;
   padding: 12px;
   border-radius: 14px;
-  background: rgba(0, 0, 0, 0.03);
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
 }
 
 .edit-panel.hidden { display: none; }
@@ -228,12 +266,12 @@ body {
   width: 100%;
   min-height: 88px;
   resize: vertical;
-  border: 1px solid rgba(0, 0, 0, 0.14);
+  border: 1px solid var(--input-border);
   border-radius: 10px;
   padding: 10px 12px;
   font: inherit;
   color: var(--text-color);
-  background: #fff;
+  background: var(--input-bg);
   outline: none;
   transition: border-color 0.16s ease, box-shadow 0.16s ease;
 }
@@ -270,19 +308,19 @@ body {
 }
 
 .edit-cancel {
-  border: 1px solid rgba(0, 0, 0, 0.10);
-  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--panel-border);
+  background: var(--secondary-button-bg);
   color: var(--text-color);
 }
 
 .edit-cancel:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--secondary-button-hover);
 }
 
 .tool-card {
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--tool-card-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--tool-card-bg);
   overflow: hidden;
   width: fit-content;
   min-width: 176px;
@@ -291,22 +329,22 @@ body {
 }
 
 .tool-card.pending {
-  border-color: color-mix(in srgb, var(--primary-color) 24%, rgba(0, 0, 0, 0.08));
+  border-color: color-mix(in srgb, var(--primary-color) 24%, var(--tool-card-border));
 }
 
 .tool-card.running {
-  border-color: color-mix(in srgb, var(--primary-color) 28%, rgba(0, 0, 0, 0.08));
+  border-color: color-mix(in srgb, var(--primary-color) 28%, var(--tool-card-border));
 }
 
 .tool-card.success {
-  border-color: color-mix(in srgb, #2e8b57 26%, rgba(0, 0, 0, 0.08));
-  background: color-mix(in srgb, #2e8b57 4%, white);
+  border-color: color-mix(in srgb, #2e8b57 26%, var(--tool-card-border));
+  background: color-mix(in srgb, #2e8b57 8%, var(--tool-card-bg));
 }
 
 .tool-card.error,
 .tool-card.denied {
-  border-color: color-mix(in srgb, #d13438 24%, rgba(0, 0, 0, 0.08));
-  background: color-mix(in srgb, #d13438 4%, white);
+  border-color: color-mix(in srgb, #d13438 24%, var(--tool-card-border));
+  background: color-mix(in srgb, #d13438 8%, var(--tool-card-bg));
 }
 
 .tool-header {
@@ -322,7 +360,7 @@ body {
 }
 
 .tool-header:hover {
-  background: rgba(0, 0, 0, 0.035);
+  background: var(--tool-card-hover);
 }
 
 .tool-icon {
@@ -375,7 +413,7 @@ body {
 .tool-body {
   display: none;
   padding: 0 10px 10px;
-  border-top: 1px solid rgba(0, 0, 0, 0.05);
+  border-top: 1px solid var(--tool-body-border);
 }
 
 .tool-card.expanded .tool-body {
@@ -386,7 +424,7 @@ body {
   margin-top: 8px;
   white-space: pre-wrap;
   line-height: 1.5;
-  color: #334155;
+  color: var(--tool-detail-color);
   font-size: 12.5px;
   min-width: 240px;
   max-width: min(560px, 68vw);
@@ -424,13 +462,13 @@ body {
 }
 
 .tool-deny {
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  background: #fff;
+  border: 1px solid var(--panel-border);
+  background: var(--secondary-button-bg);
   color: var(--text-color);
 }
 
 .tool-deny:hover {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--secondary-button-hover);
 }
 
 /* KaTeX */
@@ -448,7 +486,7 @@ body {
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-thumb { background: #c0c0c0; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 </style>
 </head>
@@ -478,7 +516,22 @@ const md = window.markdownit({
 function stripToolMarkup(text) {
   let display = text || '';
   display = display.replace(/<tool_calls>[\s\S]*?<\/tool_calls>/gi, '');
+  display = display.replace(/<tool_calls>[\s\S]*$/gi, '');
   return display.trim();
+}
+
+function withAlpha(color, alpha) {
+  if (typeof color !== 'string') {
+    return color;
+  }
+  const value = color.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(value)) {
+    return value + alpha;
+  }
+  if (/^#[0-9a-fA-F]{3}$/.test(value)) {
+    return `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}${alpha}`;
+  }
+  return color;
 }
 
 function setActionIcons(icons) {
@@ -828,42 +881,75 @@ function wrapTables(root) {
 /* Streaming support */
 let _streamDiv = null;
 let _streamBubble = null;
-let _streamText = '';
+let _streamTargetText = '';
+let _streamRenderedText = '';
 let _streamIndex = -1;
-let _streamRenderTimer = null;
+let _streamTypingTimer = null;
 
-function renderStreamContent(force = false) {
+function renderStreamContent(text) {
   if (!_streamBubble) {
     return;
   }
-  if (!force && _streamRenderTimer) {
+  const displayText = stripToolMarkup(text);
+  _streamBubble.style.whiteSpace = '';
+  _streamBubble.innerHTML = md.render(displayText);
+  wrapTables(_streamBubble);
+  renderMath(_streamBubble);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function streamChunkSize() {
+  const backlog = _streamTargetText.length - _streamRenderedText.length;
+  if (backlog > 1200) {
+    return 160;
+  }
+  if (backlog > 600) {
+    return 96;
+  }
+  if (backlog > 300) {
+    return 48;
+  }
+  if (backlog > 120) {
+    return 24;
+  }
+  if (backlog > 40) {
+    return 12;
+  }
+  return Math.max(4, backlog);
+}
+
+function scheduleStreamTick() {
+  if (_streamTypingTimer || !_streamBubble) {
     return;
   }
-  const doRender = () => {
-    _streamRenderTimer = null;
+  _streamTypingTimer = setTimeout(() => {
+    _streamTypingTimer = null;
     if (!_streamBubble) {
       return;
     }
-    const displayText = stripToolMarkup(_streamText);
-    _streamBubble.style.whiteSpace = '';
-    _streamBubble.innerHTML = md.render(displayText);
-    wrapTables(_streamBubble);
-    renderMath(_streamBubble);
-    window.scrollTo(0, document.body.scrollHeight);
-  };
-  if (force) {
-    doRender();
-  } else {
-    _streamRenderTimer = setTimeout(doRender, 100);
-  }
+    if (_streamRenderedText.length >= _streamTargetText.length) {
+      renderStreamContent(_streamRenderedText);
+      return;
+    }
+    const nextLength = Math.min(
+      _streamTargetText.length,
+      _streamRenderedText.length + streamChunkSize()
+    );
+    _streamRenderedText = _streamTargetText.slice(0, nextLength);
+    renderStreamContent(_streamRenderedText);
+    if (_streamRenderedText.length < _streamTargetText.length) {
+      scheduleStreamTick();
+    }
+  }, 33);
 }
 
 function startStream(index) {
-  _streamText = '';
+  _streamTargetText = '';
+  _streamRenderedText = '';
   _streamIndex = index;
-  if (_streamRenderTimer) {
-    clearTimeout(_streamRenderTimer);
-    _streamRenderTimer = null;
+  if (_streamTypingTimer) {
+    clearTimeout(_streamTypingTimer);
+    _streamTypingTimer = null;
   }
   const container = document.getElementById('chat-container');
   _streamDiv = document.createElement('div');
@@ -877,19 +963,20 @@ function startStream(index) {
 }
 
 function appendToken(token) {
-  _streamText += token;
-  renderStreamContent(false);
+  _streamTargetText += token;
+  scheduleStreamTick();
 }
 
 function finishStream() {
   if (_streamBubble && _streamDiv) {
-    const displayText = stripToolMarkup(_streamText);
-    if (_streamRenderTimer) {
-      clearTimeout(_streamRenderTimer);
-      _streamRenderTimer = null;
+    if (_streamTypingTimer) {
+      clearTimeout(_streamTypingTimer);
+      _streamTypingTimer = null;
     }
+    _streamRenderedText = _streamTargetText;
+    const displayText = stripToolMarkup(_streamRenderedText);
     if (displayText) {
-      renderStreamContent(true);
+      renderStreamContent(_streamRenderedText);
       attachMessageActions(_streamDiv, 'assistant', _streamIndex, displayText);
     } else {
       _streamDiv.remove();
@@ -897,7 +984,8 @@ function finishStream() {
   }
   _streamDiv = null;
   _streamBubble = null;
-  _streamText = '';
+  _streamTargetText = '';
+  _streamRenderedText = '';
   _streamIndex = -1;
   window.scrollTo(0, document.body.scrollHeight);
 }
@@ -906,12 +994,14 @@ function clearChat() {
   document.getElementById('chat-container').innerHTML = '';
 }
 
-function setTheme(primaryColor, userColor, aiColor) {
-  document.documentElement.style.setProperty('--primary-color', primaryColor);
-  document.documentElement.style.setProperty('--user-color', userColor);
-  document.documentElement.style.setProperty('--ai-color', aiColor);
-  document.documentElement.style.setProperty('--bubble-user', userColor + '18');
-  document.documentElement.style.setProperty('--bubble-ai', aiColor + '18');
+function setTheme(primaryColor, userColor, aiColor, darkMode) {
+  const root = document.documentElement;
+  root.style.setProperty('--primary-color', primaryColor);
+  root.style.setProperty('--user-color', userColor);
+  root.style.setProperty('--ai-color', aiColor);
+  root.style.setProperty('--bubble-user', withAlpha(userColor, darkMode ? '30' : '18'));
+  root.style.setProperty('--bubble-ai', withAlpha(aiColor, darkMode ? '26' : '18'));
+  root.setAttribute('data-theme', darkMode ? 'dark' : 'light');
 }
 </script>
 </body>

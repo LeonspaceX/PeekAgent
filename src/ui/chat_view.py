@@ -158,9 +158,10 @@ class ChatView(QWebEngineView):
     def clear_chat(self):
         self._run_js("clearChat();")
 
-    def set_theme(self, primary_color: str, user_color: str, ai_color: str):
+    def set_theme(self, primary_color: str, user_color: str, ai_color: str, dark_mode: bool = False):
+        self.page().setBackgroundColor(QColor("#181818") if dark_mode else QColor(255, 255, 255))
         self._run_js(
-            f"setTheme({self._to_js_arg(primary_color)}, {self._to_js_arg(user_color)}, {self._to_js_arg(ai_color)});"
+            f"setTheme({self._to_js_arg(primary_color)}, {self._to_js_arg(user_color)}, {self._to_js_arg(ai_color)}, {json.dumps(bool(dark_mode))});"
         )
 
     def apply_highlight_theme(self):

@@ -1,5 +1,6 @@
 """PeekAgent - Lightweight floating AI assistant."""
 
+import json
 import sys
 import os
 import shutil
@@ -18,7 +19,7 @@ _append_chromium_flag("--disable-direct-composition")
 _append_chromium_flag("--disable-features=DirectComposition")
 
 # Ensure data directories exist and seed default prompt files
-from src.config import BASE_DIR, ICON_PATH, RESOURCE_DIR
+from src.config import BASE_DIR, ICON_PATH, RESOURCE_DIR, SETTINGS_PATH, build_initial_settings, detect_system_dark_mode
 
 for d in ["data/context", "data/prompt"]:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
@@ -42,15 +43,23 @@ for name, src in _defaults.items():
 
 _highlight_dest = _data_dir / "highlight.json"
 if not _highlight_dest.exists():
-    shutil.copy2(RESOURCE_DIR / "highlight.json", _highlight_dest)
+    highlight_name = "highlight_dark.json" if detect_system_dark_mode() else "highlight.json"
+    shutil.copy2(RESOURCE_DIR / highlight_name, _highlight_dest)
+
+if not SETTINGS_PATH.exists():
+    SETTINGS_PATH.write_text(
+        json.dumps(build_initial_settings(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Qt, Signal, QLocale
 import keyboard
-from qfluentwidgets import setThemeColor
+from qfluentwidgets import FluentTranslator, Theme, isDarkTheme, setTheme, setThemeColor
 
 from src.config import Settings
+from src.startup_manager import maybe_handle_startup_helper
 from src.ui.main_window import MainWindow
 from src.ui.settings_window import SettingsWindow
 
@@ -63,6 +72,8 @@ class PeekAgentApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+        self._fluent_translator = FluentTranslator(QLocale("zh_CN"), self.app)
+        self.app.installTranslator(self._fluent_translator)
 
         if ICON_PATH.exists():
             self.app.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -148,16 +159,27 @@ class PeekAgentApp:
             self.settings_window = SettingsWindow()
             self.settings_window.settings_saved.connect(self._setup_hotkey)
             self.settings_window.settings_saved.connect(self._apply_theme)
+            self.settings_window.always_on_top_changed.connect(self.main_window.set_always_on_top)
             self.settings_window.reset_window_requested.connect(
                 self.main_window.reset_geometry_to_default
             )
+            self.settings_window.apply_theme(isDarkTheme())
         self.settings_window.show()
         self.settings_window.activateWindow()
 
     def _apply_theme(self):
+        theme_mode = (self.settings.get("appearance", "theme_mode", "light") or "light").strip().lower()
+        theme = {
+            "light": Theme.LIGHT,
+            "dark": Theme.DARK,
+            "auto": Theme.AUTO,
+        }.get(theme_mode, Theme.LIGHT)
+        setTheme(theme)
         primary_color = self.settings.get("appearance", "primary_theme_color", "#0ea5a4")
         setThemeColor(primary_color)
-        self.main_window.apply_theme()
+        self.main_window.apply_theme(isDarkTheme())
+        if self.settings_window is not None:
+            self.settings_window.apply_theme(isDarkTheme())
 
     def _quit(self):
         keyboard.unhook_all()
@@ -169,5 +191,8 @@ class PeekAgentApp:
 
 
 if __name__ == "__main__":
+    helper_exit_code = maybe_handle_startup_helper(sys.argv[1:])
+    if helper_exit_code is not None:
+        sys.exit(helper_exit_code)
     app = PeekAgentApp()
     sys.exit(app.run())

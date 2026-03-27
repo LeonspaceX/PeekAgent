@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 def _resolve_base_dir() -> Path:
@@ -49,6 +50,7 @@ DEFAULT_SETTINGS = {
         "external_prompt_editor_enabled": False,
     },
     "appearance": {
+        "theme_mode": "light",
         "background_effect": "none",
         "primary_theme_color": "#0ea5a4",
         "theme_color_1": "#1a73e8",
@@ -57,21 +59,16 @@ DEFAULT_SETTINGS = {
     "tools": {
         "read_enabled": True,
         "search_enabled": True,
-        "find_enabled": True,
         "write_mode": "manual",
         "add_mode": "manual",
         "replace_mode": "manual",
         "command_mode": "manual",
         "capture_enabled": True,
-        "click_mode": "manual",
-        "scroll_mode": "manual",
-        "input_mode": "manual",
-        "press_mode": "manual",
-        "select_mode": "manual",
         "web_fetch_mode": "manual",
         "web_search_enabled": True,
         "clipboard_enabled": True,
         "command_output_limit": 12000,
+        "auto_tool_round_limit": 8,
     },
     "model": {
         "endpoint_url": "",
@@ -90,6 +87,31 @@ DEFAULT_SETTINGS = {
         "y": -1,
     },
 }
+
+
+def detect_system_dark_mode() -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return int(value) == 0
+    except Exception:
+        return False
+
+
+def build_initial_settings() -> dict:
+    data = deepcopy(DEFAULT_SETTINGS)
+    if detect_system_dark_mode():
+        data["appearance"]["theme_mode"] = "dark"
+        data["appearance"]["primary_theme_color"] = "#23b5b5"
+        data["appearance"]["theme_color_1"] = "#3b82f6"
+        data["appearance"]["theme_color_2"] = "#8b5cf6"
+    else:
+        data["appearance"]["theme_mode"] = "light"
+    return data
 
 
 class Settings:
@@ -111,6 +133,8 @@ class Settings:
             if SETTINGS_PATH.exists():
                 with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                     self._data = json.load(f)
+            else:
+                self._data = build_initial_settings()
             # Merge defaults for any missing keys
             for section, defaults in DEFAULT_SETTINGS.items():
                 if section not in self._data:

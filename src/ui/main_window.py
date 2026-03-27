@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QAction, QCursor, QPainter, QColor, QPainterPath, QBrush, QRegion
 from qfluentwidgets import (
     ToolButton, FluentIcon, BodyLabel, InfoBar, InfoBarPosition,
-    MessageBox, MSFluentWindow,
+    MessageBox, MSFluentWindow, isDarkTheme,
 )
 from src.ui.chat_view import ChatView
 from src.ui.input_area import InputArea
@@ -87,8 +87,11 @@ class MainWindow(QWidget):
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+        )
+        self.setWindowFlag(
+            Qt.WindowType.WindowStaysOnTopHint,
+            bool(self.settings.get("general", "always_on_top", True)),
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
@@ -164,16 +167,27 @@ class MainWindow(QWidget):
         self.sidebar.session_renamed.connect(self._rename_session)
         self.sidebar.raise_()
 
-    def _apply_theme(self):
+    def _apply_theme(self, dark_mode: bool | None = None):
+        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
         primary_color = self.settings.get("appearance", "primary_theme_color", "#0ea5a4")
         user_color = self.settings.get("appearance", "theme_color_1", "#1a73e8")
         ai_color = self.settings.get("appearance", "theme_color_2", "#7c3aed")
-        self.chat_view.set_theme(primary_color, user_color, ai_color)
+        self.chat_view.set_theme(primary_color, user_color, ai_color, dark_mode)
         self.chat_view.apply_highlight_theme()
+        self.sidebar.apply_theme()
         self.input_area.apply_settings()
+        self.update()
 
-    def apply_theme(self):
-        self._apply_theme()
+    def apply_theme(self, dark_mode: bool | None = None):
+        self._apply_theme(dark_mode)
+
+    def set_always_on_top(self, enabled: bool):
+        was_visible = self.isVisible()
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(enabled))
+        if was_visible:
+            self.show()
+            self.raise_()
+            self.activateWindow()
 
     def _toggle_sidebar(self):
         if self.sidebar._expanded:
@@ -199,7 +213,7 @@ class MainWindow(QWidget):
         path.addRoundedRect(0, 0, self.width(), self.height(),
                             self.BORDER_RADIUS, self.BORDER_RADIUS)
         painter.setClipPath(path)
-        painter.fillPath(path, QBrush(QColor(255, 255, 255)))
+        painter.fillPath(path, QBrush(QColor("#202020") if isDarkTheme() else QColor(255, 255, 255)))
         painter.end()
 
     # --- Session management ---
@@ -407,13 +421,14 @@ class MainWindow(QWidget):
         self.chat_mgr.save_session(self._current_session)
         if tool_calls:
             self._agent_round += 1
-            if self._agent_round > 8:
+            auto_tool_round_limit = self._auto_tool_round_limit()
+            if self._agent_round > auto_tool_round_limit:
                 self._append_tool_message(
                     tool_id=uuid.uuid4().hex[:12],
                     tool_name="command",
                     title="工具调用",
                     summary="工具调用已停止",
-                    detail="为了避免无限循环，本轮工具自动调用已在第 8 轮后终止。",
+                    detail=f"为了避免无限循环，本轮工具自动调用已在第 {auto_tool_round_limit} 轮后终止。",
                     status="error",
                     content="工具调用已被中止，因为连续调用次数过多，疑似进入循环。",
                 )
@@ -424,6 +439,14 @@ class MainWindow(QWidget):
 
         self.input_area.set_streaming(False)
         self._maybe_generate_title()
+
+    def _auto_tool_round_limit(self) -> int:
+        value = self.settings.get("tools", "auto_tool_round_limit", 8)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 8
+        return max(1, parsed)
 
     def _start_tool_sequence(self, tool_calls: list[ToolCall]):
         self._tool_queue = list(tool_calls)
@@ -627,8 +650,12 @@ class MainWindow(QWidget):
         if call.tool_name == "web-search":
             topic = call.payload.get("topic", "general")
             topic_label = "新闻" if topic == "news" else "通用"
-            depth = call.payload.get("search_depth", "advanced")
-            depth_label = "高级" if depth == "advanced" else "基础"
+            depth = call.payload.get("search_depth", "basic")
+            depth_label = {
+                "basic": "基础",
+                "advanced": "高级",
+                "fast": "快速",
+            }.get(depth, depth)
             parts = [
                 f"查询词: {call.payload.get('query', '')}",
                 f"主题: {topic_label}",

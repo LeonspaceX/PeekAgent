@@ -55,6 +55,12 @@ _PS_RESULT_PREFIX = "__PEEKAGENT_B64_"
 _WEB_FETCH_TIMEOUT = (10, 60)
 _WEB_SEARCH_TIMEOUT = (10, 45)
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+_WEB_SEARCH_DEPTH_DEFAULT = "basic"
+_WEB_SEARCH_DEPTH_LABELS = {
+    "basic": "基础",
+    "advanced": "高级",
+    "fast": "快速",
+}
 _WEB_FETCH_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -178,9 +184,9 @@ class ToolParser:
             if topic not in {"general", "news"}:
                 raise ValueError("`web-search.topic` must be `general` or `news`")
             max_results = ToolParser._parse_optional_positive_int(node.get("max_results"), "web-search.max_results") or 5
-            search_depth = (node.get("search_depth") or "advanced").strip().lower() or "advanced"
-            if search_depth not in {"basic", "advanced"}:
-                raise ValueError("`web-search.search_depth` must be `basic` or `advanced`")
+            search_depth = (node.get("search_depth") or _WEB_SEARCH_DEPTH_DEFAULT).strip().lower() or _WEB_SEARCH_DEPTH_DEFAULT
+            if search_depth not in _WEB_SEARCH_DEPTH_LABELS:
+                raise ValueError("`web-search.search_depth` must be `basic`, `advanced`, or `fast`")
             days = ToolParser._parse_optional_positive_int(node.get("days"), "web-search.days")
             if topic != "news":
                 days = None
@@ -398,6 +404,13 @@ class PowerShellContextManager:
 
     @staticmethod
     def _create_process() -> subprocess.Popen:
+        kwargs: dict[str, Any] = {}
+        if os.name == "nt":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            kwargs["startupinfo"] = startupinfo
+            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         return subprocess.Popen(
             ["powershell", "-NoLogo", "-NoProfile", "-Command", "-"],
             stdin=subprocess.PIPE,
@@ -408,6 +421,7 @@ class PowerShellContextManager:
             errors="replace",
             bufsize=1,
             cwd=str(BASE_DIR),
+            **kwargs,
         )
 
     @staticmethod
@@ -835,7 +849,7 @@ class ToolRuntime:
             "api_key": api_key,
             "query": payload["query"],
             "topic": payload.get("topic", "general"),
-            "search_depth": payload.get("search_depth", "advanced"),
+            "search_depth": payload.get("search_depth", _WEB_SEARCH_DEPTH_DEFAULT),
             "max_results": payload.get("max_results", 5),
             "include_answer": False,
             "include_raw_content": False,
@@ -878,8 +892,8 @@ class ToolRuntime:
         summary = f"已搜索网页：`{payload['query']}`。"
         topic = payload.get("topic", "general")
         topic_label = "新闻" if topic == "news" else "通用"
-        depth = payload.get("search_depth", "advanced")
-        depth_label = "高级" if depth == "advanced" else "基础"
+        depth = payload.get("search_depth", _WEB_SEARCH_DEPTH_DEFAULT)
+        depth_label = _WEB_SEARCH_DEPTH_LABELS.get(depth, depth)
         detail_lines = [
             f"查询词: {payload['query']}",
             f"主题: {topic_label}",

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
 )
 from qfluentwidgets import (
     PushButton, ToolButton, FluentIcon, LineEdit,
-    MessageBox, BodyLabel,
+    MessageBox, BodyLabel, isDarkTheme,
 )
 
 
@@ -46,6 +46,17 @@ class SessionItem(QWidget):
         self.del_btn.setFixedSize(28, 28)
         self.del_btn.clicked.connect(lambda: self.delete_requested.emit(self.sid))
         layout.addWidget(self.del_btn)
+        self.apply_theme()
+
+    def apply_theme(self, dark_mode: bool | None = None, selected: bool = False):
+        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
+        text_color = "#f5f5f5" if dark_mode else "#202020"
+        muted_color = "#d4d4d4" if dark_mode else "#404040"
+        active_color = "#ffffff" if dark_mode else "#111111"
+        self.label.setStyleSheet(
+            f"font-size: 13px; font-weight: bold; color: {active_color if selected else text_color};"
+        )
+        self.name_edit.setStyleSheet(f"color: {muted_color};")
 
     def _start_rename(self):
         self.name_edit.setText(self._title)
@@ -80,12 +91,6 @@ class Sidebar(QFrame):
         self.setFixedWidth(self.SIDEBAR_WIDTH)
         self.move(-self.SIDEBAR_WIDTH, 0)
         self.setObjectName("sidebar")
-        self.setStyleSheet("""
-            #sidebar {
-                background: rgba(245, 245, 245, 0.97);
-                border-right: 1px solid #e0e0e0;
-            }
-        """)
         self._expanded = False
 
         layout = QVBoxLayout(self)
@@ -101,17 +106,39 @@ class Sidebar(QFrame):
         self.list_widget = QListWidget(self)
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.list_widget.setStyleSheet("""
-            QListWidget { border: none; background: transparent; }
-            QListWidget::item { border-radius: 6px; padding: 2px; }
-            QListWidget::item:selected { background: rgba(0,0,0,0.06); }
-            QListWidget::item:hover { background: rgba(0,0,0,0.04); }
-        """)
         layout.addWidget(self.list_widget, 1)
+        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self.list_widget.currentItemChanged.connect(self._on_current_item_changed)
+        self.apply_theme()
 
         self._anim = QPropertyAnimation(self, b"pos")
         self._anim.setDuration(200)
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def apply_theme(self):
+        dark_mode = isDarkTheme()
+        if dark_mode:
+            sidebar_bg = "rgba(32, 32, 32, 0.97)"
+            border = "#3a3a3a"
+            selected = "rgba(255,255,255,0.10)"
+            hover = "rgba(255,255,255,0.06)"
+        else:
+            sidebar_bg = "rgba(245, 245, 245, 0.97)"
+            border = "#e0e0e0"
+            selected = "rgba(0,0,0,0.06)"
+            hover = "rgba(0,0,0,0.04)"
+
+        self.setStyleSheet(f"""
+            #sidebar {{
+                background: {sidebar_bg};
+                border-right: 1px solid {border};
+            }}
+            QListWidget {{ border: none; background: transparent; }}
+            QListWidget::item {{ border-radius: 6px; padding: 2px; }}
+            QListWidget::item:selected {{ background: {selected}; }}
+            QListWidget::item:hover {{ background: {hover}; }}
+        """)
+        self._update_session_item_theme(dark_mode)
 
     def expand(self):
         self._anim.stop()
@@ -141,12 +168,25 @@ class Sidebar(QFrame):
             self.list_widget.setItemWidget(item, widget)
             if s["id"] == current_id:
                 self.list_widget.setCurrentItem(item)
-        self.list_widget.itemClicked.connect(self._on_item_clicked)
+        self._update_session_item_theme()
 
     def _on_item_clicked(self, item: QListWidgetItem):
         widget = self.list_widget.itemWidget(item)
         if widget:
             self.session_selected.emit(widget.sid)
+
+    def _on_current_item_changed(self, current: QListWidgetItem, previous: QListWidgetItem):
+        del current, previous
+        self._update_session_item_theme()
+
+    def _update_session_item_theme(self, dark_mode: bool | None = None):
+        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
+        current_item = self.list_widget.currentItem()
+        for i in range(self.list_widget.count()):
+            item = self.list_widget.item(i)
+            widget = self.list_widget.itemWidget(item)
+            if isinstance(widget, SessionItem):
+                widget.apply_theme(dark_mode, selected=(item is current_item))
 
     def _on_delete(self, sid: str):
         self.session_deleted.emit(sid)

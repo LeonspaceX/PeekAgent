@@ -164,7 +164,7 @@ new snippet
 
 ```xml
 <tool_calls>
-  <web-search query="OpenAI Responses API" max_results="5" search_depth="advanced" />
+  <web-search query="OpenAI Responses API" max_results="5" search_depth="basic" />
 </tool_calls>
 ```
 
@@ -172,7 +172,7 @@ new snippet
 
 ```xml
 <tool_calls>
-  <web-search query="OpenAI latest announcements" topic="news" days="7" include_domains="openai.com,help.openai.com" max_results="5" search_depth="advanced" />
+  <web-search query="OpenAI latest announcements" topic="news" days="7" include_domains="openai.com,help.openai.com" max_results="5" search_depth="basic" />
 </tool_calls>
 ```
 
@@ -181,7 +181,8 @@ new snippet
 - `query` 必填。
 - `topic` 可选，只能是 `general` 或 `news`，默认 `general`。
 - `max_results` 默认是 5。
-- `search_depth` 默认是 `advanced`。
+- `search_depth` 可选值为 `basic`、`advanced`、`fast`。
+- `search_depth` 默认是 `basic`。
 - `days` 只在 `topic="news"` 时有意义。
 - `include_domains` 和 `exclude_domains` 使用逗号分隔。
 - 结果只返回标题、URL、摘要和发布时间等轻量信息，不会直接返回整页原文。
