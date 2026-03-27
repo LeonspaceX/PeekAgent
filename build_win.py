@@ -42,7 +42,6 @@ QT_MODULE_EXCLUDES = [
     "PySide6.QtPdf",
     "PySide6.QtPdfWidgets",
     "PySide6.QtPositioning",
-    "PySide6.QtPrintSupport",
     "PySide6.QtQml",
     "PySide6.QtQuick",
     "PySide6.QtQuickControls2",

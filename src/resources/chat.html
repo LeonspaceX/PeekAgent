@@ -881,75 +881,42 @@ function wrapTables(root) {
 /* Streaming support */
 let _streamDiv = null;
 let _streamBubble = null;
-let _streamTargetText = '';
-let _streamRenderedText = '';
+let _streamText = '';
 let _streamIndex = -1;
-let _streamTypingTimer = null;
+let _streamRenderTimer = null;
 
-function renderStreamContent(text) {
+function renderStreamContent(force = false) {
   if (!_streamBubble) {
     return;
   }
-  const displayText = stripToolMarkup(text);
-  _streamBubble.style.whiteSpace = '';
-  _streamBubble.innerHTML = md.render(displayText);
-  wrapTables(_streamBubble);
-  renderMath(_streamBubble);
-  window.scrollTo(0, document.body.scrollHeight);
-}
-
-function streamChunkSize() {
-  const backlog = _streamTargetText.length - _streamRenderedText.length;
-  if (backlog > 1200) {
-    return 160;
-  }
-  if (backlog > 600) {
-    return 96;
-  }
-  if (backlog > 300) {
-    return 48;
-  }
-  if (backlog > 120) {
-    return 24;
-  }
-  if (backlog > 40) {
-    return 12;
-  }
-  return Math.max(4, backlog);
-}
-
-function scheduleStreamTick() {
-  if (_streamTypingTimer || !_streamBubble) {
+  if (!force && _streamRenderTimer) {
     return;
   }
-  _streamTypingTimer = setTimeout(() => {
-    _streamTypingTimer = null;
+  const doRender = () => {
+    _streamRenderTimer = null;
     if (!_streamBubble) {
       return;
     }
-    if (_streamRenderedText.length >= _streamTargetText.length) {
-      renderStreamContent(_streamRenderedText);
-      return;
-    }
-    const nextLength = Math.min(
-      _streamTargetText.length,
-      _streamRenderedText.length + streamChunkSize()
-    );
-    _streamRenderedText = _streamTargetText.slice(0, nextLength);
-    renderStreamContent(_streamRenderedText);
-    if (_streamRenderedText.length < _streamTargetText.length) {
-      scheduleStreamTick();
-    }
-  }, 33);
+    const displayText = stripToolMarkup(_streamText);
+    _streamBubble.style.whiteSpace = '';
+    _streamBubble.innerHTML = md.render(displayText);
+    wrapTables(_streamBubble);
+    renderMath(_streamBubble);
+    window.scrollTo(0, document.body.scrollHeight);
+  };
+  if (force) {
+    doRender();
+  } else {
+    _streamRenderTimer = setTimeout(doRender, 100);
+  }
 }
 
 function startStream(index) {
-  _streamTargetText = '';
-  _streamRenderedText = '';
+  _streamText = '';
   _streamIndex = index;
-  if (_streamTypingTimer) {
-    clearTimeout(_streamTypingTimer);
-    _streamTypingTimer = null;
+  if (_streamRenderTimer) {
+    clearTimeout(_streamRenderTimer);
+    _streamRenderTimer = null;
   }
   const container = document.getElementById('chat-container');
   _streamDiv = document.createElement('div');
@@ -963,20 +930,19 @@ function startStream(index) {
 }
 
 function appendToken(token) {
-  _streamTargetText += token;
-  scheduleStreamTick();
+  _streamText += token;
+  renderStreamContent(false);
 }
 
 function finishStream() {
   if (_streamBubble && _streamDiv) {
-    if (_streamTypingTimer) {
-      clearTimeout(_streamTypingTimer);
-      _streamTypingTimer = null;
+    const displayText = stripToolMarkup(_streamText);
+    if (_streamRenderTimer) {
+      clearTimeout(_streamRenderTimer);
+      _streamRenderTimer = null;
     }
-    _streamRenderedText = _streamTargetText;
-    const displayText = stripToolMarkup(_streamRenderedText);
     if (displayText) {
-      renderStreamContent(_streamRenderedText);
+      renderStreamContent(true);
       attachMessageActions(_streamDiv, 'assistant', _streamIndex, displayText);
     } else {
       _streamDiv.remove();
@@ -984,8 +950,7 @@ function finishStream() {
   }
   _streamDiv = null;
   _streamBubble = null;
-  _streamTargetText = '';
-  _streamRenderedText = '';
+  _streamText = '';
   _streamIndex = -1;
   window.scrollTo(0, document.body.scrollHeight);
 }
