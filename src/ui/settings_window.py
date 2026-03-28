@@ -12,14 +12,16 @@ from PySide6.QtGui import QColor, QIntValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget,
     QFormLayout, QFrame, QButtonGroup, QFileDialog, QScrollArea,
+    QDialog, QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from qfluentwidgets import (
     LineEdit, ComboBox, PushButton, ToolButton, FluentIcon,
     SwitchButton, SubtitleLabel, StrongBodyLabel, BodyLabel, InfoBar, InfoBarPosition,
-    ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, isDarkTheme,
+    ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, MessageBox, isDarkTheme,
 )
 from src.config import Settings, PROMPT_DIR, HIGHLIGHT_THEME_PATH, RESOURCE_DIR, detect_system_dark_mode
 from src.llm_client import LLMClient
+from src.ssh_manager import delete_client_config, list_clients_config, save_clients_config
 from src.ui.highlight_preview import HighlightPreview
 from src.startup_manager import request_auto_start_update
 
@@ -39,6 +41,193 @@ class _AsyncWorker(QThread):
             self.finished.emit(result)
         except Exception as e:
             self.errored.emit(str(e))
+
+
+class _SSHServerItem(QWidget):
+    edit_requested = Signal(str)
+    delete_requested = Signal(str)
+
+    def __init__(self, name: str, parent=None):
+        super().__init__(parent)
+        self.name = name
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(8)
+
+        self.label = StrongBodyLabel(name, self)
+        layout.addWidget(self.label, 1)
+
+        self.edit_btn = ToolButton(FluentIcon.EDIT, self)
+        self.edit_btn.setFixedSize(30, 30)
+        self.edit_btn.clicked.connect(lambda: self.edit_requested.emit(self.name))
+        layout.addWidget(self.edit_btn)
+
+        self.delete_btn = ToolButton(FluentIcon.DELETE, self)
+        self.delete_btn.setFixedSize(30, 30)
+        self.delete_btn.clicked.connect(lambda: self.delete_requested.emit(self.name))
+        layout.addWidget(self.delete_btn)
+
+
+class _SSHServerDialog(QDialog):
+    def __init__(self, servers: list[dict], initial: dict | None = None, parent=None):
+        super().__init__(parent)
+        self._servers = servers
+        self._initial_name = (initial or {}).get("name", "")
+        self._result_data = None
+
+        self.setModal(True)
+        self.setWindowTitle("SSH 服务器")
+        self.resize(460, 0)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(SubtitleLabel("SSH 服务器", self))
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+
+        self.name_edit = LineEdit(self)
+        self.name_edit.setPlaceholderText("唯一标识，例如 production")
+        form.addRow("名称:", self.name_edit)
+
+        self.host_edit = LineEdit(self)
+        self.host_edit.setPlaceholderText("IP 或域名")
+        form.addRow("Host:", self.host_edit)
+
+        self.port_edit = LineEdit(self)
+        self.port_edit.setText("22")
+        self.port_edit.setValidator(QIntValidator(1, 65535, self))
+        form.addRow("端口:", self.port_edit)
+
+        self.username_edit = LineEdit(self)
+        self.username_edit.setPlaceholderText("用户名")
+        form.addRow("用户名:", self.username_edit)
+
+        auth_row = QHBoxLayout()
+        auth_row.setSpacing(12)
+        self.auth_group = QButtonGroup(self)
+        self.key_radio = RadioButton("私钥路径", self)
+        self.password_radio = RadioButton("密码", self)
+        self.auth_group.addButton(self.key_radio)
+        self.auth_group.addButton(self.password_radio)
+        auth_row.addWidget(self.key_radio)
+        auth_row.addWidget(self.password_radio)
+        auth_row.addStretch(1)
+        form.addRow("认证方式:", auth_row)
+
+        self.auth_stack = QStackedWidget(self)
+
+        self.key_row_widget = QWidget(self.auth_stack)
+        key_row = QHBoxLayout(self.key_row_widget)
+        key_row.setContentsMargins(0, 0, 0, 0)
+        key_row.setSpacing(8)
+        self.key_path_edit = LineEdit(self.key_row_widget)
+        self.key_path_edit.setPlaceholderText("私钥文件路径")
+        key_row.addWidget(self.key_path_edit, 1)
+        self.key_browse_btn = PushButton("浏览", self.key_row_widget)
+        self.key_browse_btn.clicked.connect(self._browse_key_path)
+        key_row.addWidget(self.key_browse_btn)
+        self.auth_stack.addWidget(self.key_row_widget)
+
+        self.password_edit = LineEdit(self.auth_stack)
+        self.password_edit.setPlaceholderText("密码")
+        self.password_edit.setEchoMode(LineEdit.EchoMode.Password)
+        self.auth_stack.addWidget(self.password_edit)
+        form.addRow("认证信息:", self.auth_stack)
+
+        layout.addLayout(form)
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        self.cancel_btn = PushButton("取消", self)
+        self.cancel_btn.clicked.connect(self.reject)
+        action_row.addWidget(self.cancel_btn)
+        self.confirm_btn = PrimaryPushButton("确认", self)
+        self.confirm_btn.clicked.connect(self._on_confirm)
+        action_row.addWidget(self.confirm_btn)
+        layout.addLayout(action_row)
+
+        self.key_radio.toggled.connect(self._update_auth_fields)
+        self.password_radio.toggled.connect(self._update_auth_fields)
+
+        if initial:
+            self.name_edit.setText(initial.get("name", ""))
+            self.host_edit.setText(initial.get("host", ""))
+            self.port_edit.setText(str(initial.get("port", 22) or 22))
+            self.username_edit.setText(initial.get("username", ""))
+            if initial.get("auth_type") == "private_key":
+                self.key_radio.setChecked(True)
+            else:
+                self.password_radio.setChecked(True)
+            self.key_path_edit.setText(initial.get("private_key_path", ""))
+            self.password_edit.setText(initial.get("password", ""))
+        else:
+            self.password_radio.setChecked(True)
+        self._update_auth_fields()
+
+    def _browse_key_path(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "选择私钥文件")
+        if file_path:
+            self.key_path_edit.setText(file_path)
+
+    def _update_auth_fields(self):
+        self.auth_stack.setCurrentWidget(self.key_row_widget if self.key_radio.isChecked() else self.password_edit)
+
+    def _on_confirm(self):
+        name = self.name_edit.text().strip()
+        host = self.host_edit.text().strip()
+        username = self.username_edit.text().strip()
+        if not name:
+            self._show_error("名称不能为空。")
+            return
+        if any(item.get("name") == name for item in self._servers if item.get("name") != self._initial_name):
+            self._show_error("名称必须唯一。")
+            return
+        if not host:
+            self._show_error("Host 不能为空。")
+            return
+        if not username:
+            self._show_error("用户名不能为空。")
+            return
+        port_text = self.port_edit.text().strip() or "22"
+        try:
+            port = int(port_text)
+        except ValueError:
+            self._show_error("端口必须是有效整数。")
+            return
+        if port <= 0 or port > 65535:
+            self._show_error("端口必须在 1 到 65535 之间。")
+            return
+
+        auth_type = "private_key" if self.key_radio.isChecked() else "password"
+        private_key_path = self.key_path_edit.text().strip()
+        password = self.password_edit.text()
+        if auth_type == "private_key" and not private_key_path:
+            self._show_error("请选择私钥路径。")
+            return
+        if auth_type == "password" and not password:
+            self._show_error("请输入密码。")
+            return
+
+        self._result_data = {
+            "name": name,
+            "host": host,
+            "port": port,
+            "username": username,
+            "auth_type": auth_type,
+            "private_key_path": private_key_path,
+            "password": password,
+        }
+        self.accept()
+
+    def result_data(self) -> dict | None:
+        return self._result_data
+
+    def _show_error(self, message: str):
+        InfoBar.error("保存失败", message, parent=self, position=InfoBarPosition.TOP, duration=3000)
 
 
 class SettingsWindow(QWidget):
@@ -66,7 +255,7 @@ class SettingsWindow(QWidget):
         # Left nav
         self.nav_list = ListWidget(self)
         self.nav_list.setFixedWidth(140)
-        for name in ["通用", "外观", "模型", "Tavily", "工具", "提示词", "关于"]:
+        for name in ["通用", "外观", "模型", "Tavily", "工具", "SSH 服务器", "提示词", "关于"]:
             self.nav_list.addItem(name)
         self.nav_list.currentRowChanged.connect(self._switch_page)
         layout.addWidget(self.nav_list)
@@ -78,6 +267,7 @@ class SettingsWindow(QWidget):
         self.stack.addWidget(self._build_model_page())
         self.stack.addWidget(self._build_tavily_page())
         self.stack.addWidget(self._wrap_scroll(self._build_tools_page()))
+        self.stack.addWidget(self._wrap_scroll(self._build_ssh_page()))
         self.stack.addWidget(self._build_prompt_page())
         self.stack.addWidget(self._build_about_page())
         layout.addWidget(self.stack, 1)
@@ -454,6 +644,9 @@ class SettingsWindow(QWidget):
         self.command_mode_group, command_row = self._create_mode_row()
         form.addRow("执行命令:", command_row)
 
+        self.ssh_remote_command_mode_group, ssh_remote_command_row = self._create_mode_row()
+        form.addRow("远程执行命令:", ssh_remote_command_row)
+
         self.web_fetch_mode_group, web_fetch_row = self._create_mode_row()
         form.addRow("抓取网页:", web_fetch_row)
 
@@ -467,6 +660,96 @@ class SettingsWindow(QWidget):
         self.auto_tool_round_limit_edit.setValidator(QIntValidator(1, 1000, self))
         form.addRow("自动工具调用上限:", self.auto_tool_round_limit_edit)
         return page
+
+    def _build_ssh_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        header_row.addWidget(SubtitleLabel("SSH 服务器"))
+        header_row.addStretch(1)
+        self.add_ssh_server_btn = ToolButton(FluentIcon.ADD, self)
+        self.add_ssh_server_btn.setFixedSize(32, 32)
+        self.add_ssh_server_btn.clicked.connect(self._add_ssh_server)
+        header_row.addWidget(self.add_ssh_server_btn)
+        layout.addLayout(header_row)
+
+        self.ssh_server_list = QListWidget(self)
+        self.ssh_server_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.ssh_server_list.setFrameShape(QFrame.Shape.NoFrame)
+        self.ssh_server_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        layout.addWidget(self.ssh_server_list, 1)
+
+        self.ssh_server_empty_label = BodyLabel("还没有配置 SSH 服务器。", self)
+        layout.addWidget(self.ssh_server_empty_label)
+
+        self._reload_ssh_server_list()
+        return page
+
+    def _reload_ssh_server_list(self):
+        servers = list_clients_config()
+        self.ssh_server_list.clear()
+        self.ssh_server_empty_label.setVisible(not servers)
+        for server in servers:
+            name = server.get("name", "").strip()
+            if not name:
+                continue
+            item = QListWidgetItem(self.ssh_server_list)
+            widget = _SSHServerItem(name, self.ssh_server_list)
+            widget.edit_requested.connect(self._edit_ssh_server)
+            widget.delete_requested.connect(self._delete_ssh_server)
+            item.setSizeHint(widget.sizeHint())
+            self.ssh_server_list.addItem(item)
+            self.ssh_server_list.setItemWidget(item, widget)
+
+    def _add_ssh_server(self):
+        dialog = _SSHServerDialog(list_clients_config(), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.result_data()
+        if not data:
+            return
+        servers = list_clients_config()
+        servers.append(data)
+        servers.sort(key=lambda item: item.get("name", "").lower())
+        save_clients_config({"clients": servers})
+        self._reload_ssh_server_list()
+        self.settings_saved.emit()
+        InfoBar.success("保存成功", "SSH 服务器已新增。", parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _edit_ssh_server(self, name: str):
+        servers = list_clients_config()
+        server = next((item for item in servers if item.get("name") == name), None)
+        if server is None:
+            InfoBar.error("编辑失败", f"未找到 SSH 服务器 `{name}`。", parent=self, position=InfoBarPosition.TOP, duration=3000)
+            return
+        dialog = _SSHServerDialog(servers, initial=server, parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        data = dialog.result_data()
+        if not data:
+            return
+        updated = [item for item in servers if item.get("name") != name]
+        updated.append(data)
+        updated.sort(key=lambda item: item.get("name", "").lower())
+        save_clients_config({"clients": updated})
+        self._reload_ssh_server_list()
+        self.settings_saved.emit()
+        InfoBar.success("保存成功", "SSH 服务器已更新。", parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _delete_ssh_server(self, name: str):
+        dialog = MessageBox("删除 SSH 服务器", f"确定要删除 `{name}` 吗？", self)
+        dialog.yesButton.setText("删除")
+        dialog.cancelButton.setText("取消")
+        if not dialog.exec():
+            return
+        delete_client_config(name)
+        self._reload_ssh_server_list()
+        self.settings_saved.emit()
+        InfoBar.success("删除成功", "SSH 服务器已删除。", parent=self, position=InfoBarPosition.TOP, duration=3000)
 
     def _create_mode_row(self):
         row = QHBoxLayout()
@@ -615,6 +898,7 @@ class SettingsWindow(QWidget):
             self._set_mode_group(self.add_mode_group, s.get("tools", "add_mode", "manual"))
             self._set_mode_group(self.replace_mode_group, s.get("tools", "replace_mode", "manual"))
             self._set_mode_group(self.command_mode_group, s.get("tools", "command_mode", "manual"))
+            self._set_mode_group(self.ssh_remote_command_mode_group, s.get("tools", "ssh_remote_command_mode", "manual"))
             self._set_mode_group(self.web_fetch_mode_group, s.get("tools", "web_fetch_mode", "manual"))
             self.command_output_limit_edit.setText(str(s.get("tools", "command_output_limit", 12000)))
             self.auto_tool_round_limit_edit.setText(str(s.get("tools", "auto_tool_round_limit", 8)))
@@ -647,6 +931,7 @@ class SettingsWindow(QWidget):
         s.set("tools", "add_mode", self._mode_group_value(self.add_mode_group))
         s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group))
         s.set("tools", "command_mode", self._mode_group_value(self.command_mode_group))
+        s.set("tools", "ssh_remote_command_mode", self._mode_group_value(self.ssh_remote_command_mode_group))
         s.set("tools", "web_fetch_mode", self._mode_group_value(self.web_fetch_mode_group))
         s.set("tools", "command_output_limit", self._command_output_limit_value())
         s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value())

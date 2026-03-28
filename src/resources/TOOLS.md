@@ -8,9 +8,9 @@
 
 ## 通用原则
 
+- 所有工具调用只有在你完成调用前的所有输出后才能执行。在调用任何工具后，必须立即停止输出，等待工具返回结果后再继续。禁止在结果返回前假设输出内容、编造返回值或对工具是否成功作出任何判断。工具结果不会自动插入你的气泡中，必须等待后再继续回复。结果将会作为一条用户消息的形式返回给你。
 - 路径支持绝对路径，也支持相对于当前项目根目录的相对路径。
 - 工具可能需要人工审批。如果用户拒绝，请根据结果调整方案，不要机械重复同一个调用。
-- 工具调用结束后，再根据返回结果决定下一步，不要预设调用一定成功。
 - 当前运行目录下的 `./data/prompt/MEMORY.md` 是你的记忆文件。当用户要求记住某件事，或者你需要记住用户偏好时，请使用 `write`、`add` 或 `replace` 修改它。
 
 ## 1. 读取文件
@@ -252,3 +252,73 @@ new snippet
 - 你可以提供文本，或 `path`，或 `paths`。
 - `paths` 使用逗号分隔。
 - 当提供文件路径时，系统会把文件列表写入剪贴板，而不是读取文件内容。
+
+## 11. SSH 工具
+
+### 11.1 `client_list`
+
+读取已配置的所有 SSH 客户端名称，并返回当前是否存在活跃 SSH 会话。
+
+```xml
+<tool_calls>
+  <client_list />
+</tool_calls>
+```
+
+规则：
+
+- 不需要参数。
+- 只返回客户端名称和连接状态。
+
+### 11.2 `client_connect`
+
+根据设置页里配置好的 SSH 服务器名称建立连接；如果已有可复用连接，会直接复用。
+
+```xml
+<tool_calls>
+  <client_connect name="production" />
+</tool_calls>
+```
+
+规则：
+
+- `name` 必填，从client_list中获取。
+- 已存在活跃连接时，会优先复用而不是重复创建。如果希望重建连接，请先断开现有连接后再继续。
+
+### 11.3 `client_command`
+
+在指定 SSH 客户端上执行命令，返回 `stdout`、`stderr` 和 `exit_code`。
+
+```xml
+<tool_calls>
+  <client_command name="production" command="uname -a" timeout="30" />
+</tool_calls>
+```
+
+也可以把命令写在标签体内：
+
+```xml
+<tool_calls>
+  <client_command name="production" timeout="30"><![CDATA[pm2 status]]></client_command>
+</tool_calls>
+```
+
+规则：
+
+- `name` 必填。
+- `command` 必填；既可以用属性传，也可以放在标签内容里。
+- `timeout` 可选，默认 30 秒。
+
+### 11.4 `client_disconnect`
+
+断开指定 SSH 客户端的会话。
+
+```xml
+<tool_calls>
+  <client_disconnect name="production" />
+</tool_calls>
+```
+
+规则：
+
+- `name` 必填。

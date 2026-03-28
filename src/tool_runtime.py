@@ -25,6 +25,13 @@ from readability import Document
 
 from src.chat_manager import ATTACHMENTS_DIR
 from src.config import BASE_DIR, Settings
+from src.ssh_manager import (
+    client_command as ssh_client_command,
+    client_connect as ssh_client_connect,
+    client_disconnect as ssh_client_disconnect,
+    client_list as ssh_client_list,
+    disconnect_all_clients,
+)
 
 
 _TOOL_CALLS_PATTERN = re.compile(r"(?is)<tool_calls>([\s\S]*?)</tool_calls>")
@@ -92,6 +99,10 @@ class ToolCall:
             "web-fetch": "抓取网页",
             "web-search": "联网搜索",
             "clipboard": "写入剪贴板",
+            "client_list": "SSH 客户端列表",
+            "client_connect": "连接 SSH 客户端",
+            "client_command": "SSH 远程执行命令",
+            "client_disconnect": "断开 SSH 客户端",
         }.get(self.tool_name, self.tool_name)
 
 
@@ -107,7 +118,22 @@ class ToolResult:
 
 
 class ToolParser:
-    _TOOL_NAMES = {"read", "search", "write", "add", "replace", "command", "capture", "web-fetch", "web-search", "clipboard"}
+    _TOOL_NAMES = {
+        "read",
+        "search",
+        "write",
+        "add",
+        "replace",
+        "command",
+        "capture",
+        "web-fetch",
+        "web-search",
+        "clipboard",
+        "client_list",
+        "client_connect",
+        "client_command",
+        "client_disconnect",
+    }
 
     @staticmethod
     def parse_response(text: str) -> tuple[str, list[ToolCall]]:
@@ -275,6 +301,31 @@ class ToolParser:
             if context is not None:
                 context = context.strip() or None
             return {"content": content, "context": context, "timeout_seconds": timeout}
+
+        if tool_name == "client_list":
+            return {}
+
+        if tool_name == "client_connect":
+            name = (node.get("name") or (node.text or "")).strip()
+            if not name:
+                raise ValueError("`client_connect` requires `name`")
+            return {"name": name}
+
+        if tool_name == "client_command":
+            name = (node.get("name") or "").strip()
+            command = (node.get("command") or ToolParser._node_text(node)).strip()
+            if not name:
+                raise ValueError("`client_command` requires `name`")
+            if not command:
+                raise ValueError("`client_command` requires `command`")
+            timeout = ToolParser._parse_optional_positive_int(node.get("timeout"), "client_command.timeout") or 30
+            return {"name": name, "command": command, "timeout": timeout}
+
+        if tool_name == "client_disconnect":
+            name = (node.get("name") or (node.text or "")).strip()
+            if not name:
+                raise ValueError("`client_disconnect` requires `name`")
+            return {"name": name}
 
         raise ValueError(f"unsupported tool `{tool_name}`")
 
@@ -525,6 +576,7 @@ class ToolRuntime:
 
     def close(self):
         self.command_contexts.close_all()
+        disconnect_all_clients()
 
     def get_command_output_limit(self) -> int:
         value = self.settings.get("tools", "command_output_limit", 12000)
@@ -545,6 +597,8 @@ class ToolRuntime:
             return "auto" if self.settings.get("tools", "web_search_enabled", True) else "off"
         if tool_name == "clipboard":
             return "auto" if self.settings.get("tools", "clipboard_enabled", True) else "off"
+        if tool_name in {"client_list", "client_connect", "client_command", "client_disconnect"}:
+            return self.settings.get("tools", "ssh_remote_command_mode", "manual")
         key = tool_name.replace("-", "_")
         return self.settings.get("tools", f"{key}_mode", "manual")
 
@@ -577,6 +631,14 @@ class ToolRuntime:
                 return self._web_search(call.payload)
             if call.tool_name == "clipboard":
                 return self._clipboard(call.payload)
+            if call.tool_name == "client_list":
+                return self._client_list()
+            if call.tool_name == "client_connect":
+                return self._client_connect(call.payload)
+            if call.tool_name == "client_command":
+                return self._client_command(call.payload)
+            if call.tool_name == "client_disconnect":
+                return self._client_disconnect(call.payload)
         except Exception as exc:
             message = self._error_content(f"{call.display_name}失败：{exc}")
             return ToolResult(call.tool_name, "error", message, message, message)
@@ -934,6 +996,63 @@ class ToolRuntime:
         detail = text_value if len(text_value) <= 500 else text_value[:500] + "..."
         content = self._success_content("已将文本写入系统剪贴板。")
         return ToolResult("clipboard", "success", summary, detail, content)
+
+    def _client_list(self) -> ToolResult:
+        clients = ssh_client_list()
+        if not clients:
+            summary = "未配置 SSH 客户端。"
+            detail = str(BASE_DIR / "data" / "ssh_clients.json")
+            content = self._success_content("当前没有已配置的 SSH 客户端。")
+            return ToolResult("client_list", "success", summary, detail, content)
+
+        lines = [f"- {item['name']} | {'已连接' if item.get('connected') else '未连接'}" for item in clients]
+        body = "\n".join(lines)
+        summary = f"已读取 {len(clients)} 个 SSH 客户端。"
+        detail = str(BASE_DIR / "data" / "ssh_clients.json")
+        content = self._success_content(f"SSH 客户端列表：\n{body}")
+        return ToolResult("client_list", "success", summary, detail, content)
+
+    def _client_connect(self, payload: dict[str, Any]) -> ToolResult:
+        _, created = ssh_client_connect(payload["name"])
+        summary = f"SSH 客户端 `{payload['name']}` 已连接。"
+        detail = payload["name"]
+        content = self._success_content(
+            f"{'已建立' if created else '已复用'} SSH 会话：{payload['name']}"
+        )
+        return ToolResult("client_connect", "success", summary, detail, content)
+
+    def _client_command(self, payload: dict[str, Any]) -> ToolResult:
+        result = ssh_client_command(payload["name"], payload["command"], payload.get("timeout", 30))
+        detail = f"{payload['name']}\n{payload['command']}"
+        if not result.get("ok"):
+            message = result.get("error", "远程命令执行失败。")
+            content = self._error_content(message)
+            return ToolResult("client_command", "error", message, detail, content)
+
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        exit_code = result.get("exit_code", -1)
+        output_parts = [f"exit_code: {exit_code}"]
+        if stdout:
+            output_parts.append(f"stdout:\n{self._truncate_command_output(stdout, self.get_command_output_limit())}")
+        if stderr:
+            output_parts.append(f"stderr:\n{self._truncate_command_output(stderr, self.get_command_output_limit())}")
+        if not stdout and not stderr:
+            output_parts.append("命令执行完成，无可见输出。")
+        summary = f"SSH 命令已在 `{payload['name']}` 上执行。"
+        content = self._success_content("\n\n".join(output_parts))
+        return ToolResult("client_command", "success", summary, detail, content)
+
+    def _client_disconnect(self, payload: dict[str, Any]) -> ToolResult:
+        disconnected = ssh_client_disconnect(payload["name"])
+        detail = payload["name"]
+        if disconnected:
+            summary = f"SSH 客户端 `{payload['name']}` 已断开。"
+            content = self._success_content(f"已断开 SSH 会话：{payload['name']}")
+        else:
+            summary = f"SSH 客户端 `{payload['name']}` 当前未连接。"
+            content = self._success_content(f"SSH 会话 `{payload['name']}` 当前未连接。")
+        return ToolResult("client_disconnect", "success", summary, detail, content)
 
     @staticmethod
     def _success_content(message: str) -> str:

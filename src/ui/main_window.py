@@ -18,7 +18,7 @@ from qfluentwidgets import (
 from src.ui.chat_view import ChatView
 from src.ui.input_area import InputArea
 from src.ui.sidebar import Sidebar
-from src.chat_manager import ChatManager, ATTACHMENTS_DIR
+from src.chat_manager import ChatManager, ATTACHMENTS_DIR, normalize_session_title
 from src.api_client import ApiClient, TitleWorker
 from src.config import ICON_PATH, Settings
 from src.tool_runtime import ToolCall, ToolExecutionWorker, ToolParser, ToolRuntime
@@ -645,6 +645,17 @@ class MainWindow(QWidget):
             return str(call.payload.get("path", ""))
         if call.tool_name == "command":
             return str(call.payload.get("content", ""))
+        if call.tool_name == "client_list":
+            return "读取已配置 SSH 客户端及连接状态"
+        if call.tool_name == "client_connect":
+            return f"连接至{call.payload.get('name', '')}"
+        if call.tool_name == "client_command":
+            return (
+                f"执行节点：{call.payload.get('name', '')}\n"
+                f"执行命令：{call.payload.get('command', '')}"
+            )
+        if call.tool_name == "client_disconnect":
+            return str(call.payload.get("name", ""))
         if call.tool_name == "web-fetch":
             return str(call.payload.get("url", ""))
         if call.tool_name == "web-search":
@@ -706,12 +717,12 @@ class MainWindow(QWidget):
 
     def _on_title_ready(self, title: str):
         if self._current_session:
-            self._start_title_typing(title)
+            self._start_title_typing(normalize_session_title(title))
         self._title_worker = None
 
     def _start_title_typing(self, title: str):
         self._stop_title_typing()
-        self._pending_title_text = title
+        self._pending_title_text = normalize_session_title(title)
         self._title_typing_index = 0
         self._title_typing_session_id = self._current_session["id"] if self._current_session else None
         self.title_label.setText("")

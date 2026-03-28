@@ -99,6 +99,10 @@ class ChatView(QWebEngineView):
             "tool_web-fetch": self._icon_data_uri(FluentIcon.GLOBE),
             "tool_web-search": self._icon_data_uri(FluentIcon.SEARCH),
             "tool_clipboard": self._icon_data_uri(FluentIcon.COPY),
+            "tool_client_list": self._icon_data_uri(FluentIcon.FOLDER),
+            "tool_client_connect": self._icon_data_uri(FluentIcon.LINK),
+            "tool_client_command": self._icon_data_uri(FluentIcon.DEVELOPER_TOOLS),
+            "tool_client_disconnect": self._icon_data_uri(FluentIcon.CANCEL_MEDIUM),
         }
         return f"setActionIcons({json.dumps(icons, ensure_ascii=False)});"
 

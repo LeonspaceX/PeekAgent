@@ -63,6 +63,7 @@ DEFAULT_SETTINGS = {
         "add_mode": "manual",
         "replace_mode": "manual",
         "command_mode": "manual",
+        "ssh_remote_command_mode": "manual",
         "capture_enabled": True,
         "web_fetch_mode": "manual",
         "web_search_enabled": True,

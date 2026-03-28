@@ -6,3 +6,4 @@ requests>=2.31.0
 chardet<6
 readability-lxml>=0.8.1
 markdownify>=0.13.1
+paramiko>=3.4.0

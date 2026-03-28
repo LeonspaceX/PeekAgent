@@ -10,6 +10,11 @@ from src.config import CONTEXT_DIR
 ATTACHMENTS_DIR = CONTEXT_DIR / "attachments"
 
 
+def normalize_session_title(title: str | None) -> str:
+    value = (title or "").replace("\r", "").replace("\n", "").strip()
+    return value or "新对话"
+
+
 class ChatManager:
     def __init__(self):
         CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -23,7 +28,7 @@ class ChatManager:
                     data = json.load(fp)
                 sessions.append({
                     "id": data["id"],
-                    "title": data.get("title", "新对话"),
+                    "title": normalize_session_title(data.get("title", "新对话")),
                     "created_at": data.get("created_at", ""),
                 })
             except (json.JSONDecodeError, KeyError):
@@ -35,7 +40,7 @@ class ChatManager:
         sid = str(uuid.uuid4())
         data = {
             "id": sid,
-            "title": title,
+            "title": normalize_session_title(title),
             "created_at": datetime.now().isoformat(),
             "messages": [],
         }
@@ -47,7 +52,10 @@ class ChatManager:
         if not path.exists():
             return None
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        if isinstance(data, dict):
+            data["title"] = normalize_session_title(data.get("title", "新对话"))
+        return data
 
     def save_session(self, data: dict):
         self._save(data["id"], data)
@@ -64,7 +72,7 @@ class ChatManager:
     def rename_session(self, sid: str, new_title: str):
         data = self.load_session(sid)
         if data:
-            data["title"] = new_title
+            data["title"] = normalize_session_title(new_title)
             self._save(sid, data)
 
     def append_message(self, sid: str, role: str, content: str):
@@ -75,5 +83,7 @@ class ChatManager:
 
     def _save(self, sid: str, data: dict):
         path = CONTEXT_DIR / f"{sid}.json"
+        data = dict(data)
+        data["title"] = normalize_session_title(data.get("title", "新对话"))
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
