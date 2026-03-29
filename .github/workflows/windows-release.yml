@@ -12,6 +12,7 @@ env:
   PYTHON_VERSION: "3.12"
   APP_NAME: "PeekAgent"
   ARCHIVE_NAME: "PeekAgent-windows-amd64.zip"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build-windows:
@@ -71,7 +72,7 @@ jobs:
           merge-multiple: true
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.5.0
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
