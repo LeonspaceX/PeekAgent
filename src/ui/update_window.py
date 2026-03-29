@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import subprocess
 import tempfile
 import textwrap
 import uuid
@@ -22,6 +21,7 @@ class UpdateWorker(QThread):
     stage_changed = Signal(str, int, str)
     failed = Signal(str)
     ready = Signal(str, str)
+    cancelled = Signal()
 
     def __init__(
         self,
@@ -29,6 +29,7 @@ class UpdateWorker(QThread):
         mirror_prefix: str,
         app_dir: str,
         executable_path: str,
+        current_pid: int,
         parent=None,
     ):
         super().__init__(parent)
@@ -36,12 +37,19 @@ class UpdateWorker(QThread):
         self._mirror_prefix = mirror_prefix
         self._app_dir = Path(app_dir)
         self._executable_path = Path(executable_path)
+        self._current_pid = int(current_pid)
 
     def run(self):
         try:
             self._run_impl()
+        except _UpdateCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _ensure_not_cancelled(self):
+        if self.isInterruptionRequested():
+            raise _UpdateCancelled()
 
     def _run_impl(self):
         temp_root = Path(tempfile.gettempdir()) / f"peekagent_update_{uuid.uuid4().hex}"
@@ -50,9 +58,13 @@ class UpdateWorker(QThread):
         extract_root = temp_root / "extract"
         extract_root.mkdir(parents=True, exist_ok=True)
 
+        self._ensure_not_cancelled()
         self._download_archive(archive_path)
+        self._ensure_not_cancelled()
         self._verify_archive(archive_path)
+        self._ensure_not_cancelled()
         package_dir = self._extract_archive(archive_path, extract_root)
+        self._ensure_not_cancelled()
         batch_path = self._write_update_script(temp_root, package_dir, archive_path)
         self.stage_changed.emit("收尾", 100, "更新脚本已准备完成，正在退出程序...")
         self.ready.emit(str(batch_path), self._release_info.version)
@@ -70,6 +82,7 @@ class UpdateWorker(QThread):
         written = 0
         with archive_path.open("wb") as file:
             for chunk in response.iter_content(chunk_size=1024 * 128):
+                self._ensure_not_cancelled()
                 if not chunk:
                     continue
                 file.write(chunk)
@@ -86,6 +99,7 @@ class UpdateWorker(QThread):
         digest = hashlib.sha256()
         with archive_path.open("rb") as file:
             while True:
+                self._ensure_not_cancelled()
                 chunk = file.read(1024 * 1024)
                 if not chunk:
                     break
@@ -109,6 +123,7 @@ class UpdateWorker(QThread):
                 if not members:
                     raise RuntimeError("压缩包为空")
                 for index, member in enumerate(members, start=1):
+                    self._ensure_not_cancelled()
                     archive.extract(member, extract_root)
                     progress = int(index * 100 / len(members))
                     self.stage_changed.emit("解压", progress, f"正在解压更新包... {index}/{len(members)}")
@@ -141,10 +156,10 @@ class UpdateWorker(QThread):
             set "ARCHIVE_PATH={archive_path}"
             set "SCRIPT_PATH=%~f0"
             set "TARGET_EXE={self._executable_path}"
-            set "PROCESS_NAME={self._executable_path.name}"
+            set "TARGET_PID={self._current_pid}"
 
             :wait_process
-            tasklist /FI "IMAGENAME eq %PROCESS_NAME%" | find /I "%PROCESS_NAME%" >nul
+            tasklist /FI "PID eq %TARGET_PID%" | find "%TARGET_PID%" >nul
             if not errorlevel 1 (
                 timeout /t 2 /nobreak >nul
                 goto wait_process
@@ -152,7 +167,7 @@ class UpdateWorker(QThread):
 
             timeout /t 2 /nobreak >nul
 
-            robocopy "%PACKAGE_DIR%" "%APP_DIR%" /E /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul
+            robocopy "%PACKAGE_DIR%" "%APP_DIR%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul
             set "ROBOCOPY_EXIT=%ERRORLEVEL%"
             if %ROBOCOPY_EXIT% GEQ 8 (
                 echo 更新失败：覆盖文件时 robocopy 返回 %ROBOCOPY_EXIT%
@@ -174,6 +189,10 @@ class UpdateWorker(QThread):
         return script_path
 
 
+class _UpdateCancelled(Exception):
+    pass
+
+
 class UpdateDialog(QDialog):
     update_apply_requested = Signal(str)
 
@@ -184,34 +203,25 @@ class UpdateDialog(QDialog):
         mirror_prefix: str,
         app_dir: str,
         executable_path: str,
+        current_pid: int,
         parent=None,
     ):
         super().__init__(parent)
-        self._worker = UpdateWorker(release_info, mirror_prefix, app_dir, executable_path, self)
+        self._worker = UpdateWorker(release_info, mirror_prefix, app_dir, executable_path, current_pid, self)
         self._worker.stage_changed.connect(self._on_stage_changed)
         self._worker.failed.connect(self._on_failed)
         self._worker.ready.connect(self._on_ready)
+        self._worker.cancelled.connect(self._on_cancelled)
 
         self.setWindowTitle("版本升级")
         self.setModal(True)
-        self.resize(460, 220)
+        self.resize(420, 160)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        title_row = QHBoxLayout()
-        self.icon_btn = ToolButton(FluentIcon.UPDATE, self)
-        self.icon_btn.setEnabled(False)
-        title_row.addWidget(self.icon_btn)
-        title_row.addWidget(SubtitleLabel("正在准备升级", self), 1)
-        layout.addLayout(title_row)
-
-        layout.addWidget(BodyLabel(f"当前版本：{current_version}", self))
-        layout.addWidget(BodyLabel(f"目标版本：{release_info.version}", self))
-
-        self.stage_label = BodyLabel("阶段：等待开始", self)
-        layout.addWidget(self.stage_label)
+        layout.addWidget(SubtitleLabel("正在准备升级", self))
 
         self.status_label = BodyLabel("正在初始化升级任务...", self)
         self.status_label.setWordWrap(True)
@@ -222,14 +232,11 @@ class UpdateDialog(QDialog):
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
 
-        self.percent_label = BodyLabel("0%", self)
-        layout.addWidget(self.percent_label)
-
         button_row = QHBoxLayout()
         button_row.addStretch(1)
-        self.close_btn = PushButton("关闭", self)
-        self.close_btn.clicked.connect(self.reject)
-        button_row.addWidget(self.close_btn)
+        self.cancel_btn = PushButton("取消", self)
+        self.cancel_btn.clicked.connect(self._cancel_update)
+        button_row.addWidget(self.cancel_btn)
         layout.addLayout(button_row)
 
         self._worker.start()
@@ -240,22 +247,37 @@ class UpdateDialog(QDialog):
         super().reject()
 
     def _on_stage_changed(self, stage: str, progress: int, status: str):
-        self.stage_label.setText(f"阶段：{stage}")
-        self.status_label.setText(status)
+        self.status_label.setText(f"{stage}: {status}")
         self.progress_bar.setValue(max(0, min(100, progress)))
-        self.percent_label.setText(f"{max(0, min(100, progress))}%")
 
     def _on_failed(self, message: str):
-        self.stage_label.setText("阶段：失败")
         self.status_label.setText(message)
         self.progress_bar.setValue(0)
-        self.percent_label.setText("0%")
-        self.close_btn.setEnabled(True)
+        self.cancel_btn.setText("关闭")
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.clicked.disconnect()
+        self.cancel_btn.clicked.connect(self.accept)
 
     def _on_ready(self, batch_path: str, version: str):
         self.status_label.setText(f"更新已准备完成，正在退出并应用 {version}...")
-        self.close_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
         self.update_apply_requested.emit(batch_path)
+
+    def _on_cancelled(self):
+        self.status_label.setText("已取消升级")
+        self.progress_bar.setValue(0)
+        self.cancel_btn.setText("关闭")
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.clicked.disconnect()
+        self.cancel_btn.clicked.connect(self.accept)
+
+    def _cancel_update(self):
+        if not self._worker.isRunning():
+            self.accept()
+            return
+        self.cancel_btn.setEnabled(False)
+        self.status_label.setText("正在取消升级...")
+        self._worker.requestInterruption()
 
 
 class UpdateCompleteDialog(QDialog):

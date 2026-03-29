@@ -3,6 +3,7 @@
 import ctypes
 import json
 import math
+import os
 import requests
 from pathlib import Path
 
@@ -903,6 +904,7 @@ class SettingsWindow(QWidget):
             mirror_prefix=self.github_mirror_edit.text().strip(),
             app_dir=str(BASE_DIR),
             executable_path=str(BASE_DIR / "PeekAgent.exe"),
+            current_pid=os.getpid(),
             parent=self,
         )
         self._update_dialog.update_apply_requested.connect(lambda batch_path: self.update_apply_requested.emit(batch_path))

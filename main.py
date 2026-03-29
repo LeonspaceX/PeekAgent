@@ -262,17 +262,19 @@ class PeekAgentApp:
 
     def _launch_update_and_quit(self, batch_path: str):
         try:
-            creation_flags = 0
-            if os.name == "nt":
-                creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
             subprocess.Popen(
                 ["cmd", "/c", batch_path],
-                creationflags=creation_flags,
+                creationflags=0,
                 close_fds=False,
             )
         except Exception as exc:
-            if self.settings_window is not None:
-                self.settings_window.update_status_label.setText(f"启动升级脚本失败：{exc}")
+            if hasattr(self, "tray"):
+                self.tray.showMessage(
+                    "升级失败",
+                    f"启动升级脚本失败：{exc}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    5000,
+                )
             return
         self._graceful_quit()
 

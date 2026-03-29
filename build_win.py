@@ -64,6 +64,7 @@ QT_MODULE_EXCLUDES = [
     "PySide6.QtWebEngineQuick",
     "PySide6.QtWebSockets",
     "PySide6.QtWebView",
+    "matplotlib",
 ]
 
 
@@ -139,6 +140,12 @@ def _zip_dist() -> Path:
     return ARCHIVE_PATH
 
 
+def _trim_dist() -> None:
+    debug_pak = APP_DIR / "_internal" / "PySide6" / "resources" / "qtwebengine_devtools_resources.debug.pak"
+    if debug_pak.exists():
+        debug_pak.unlink()
+
+
 def main() -> int:
     if sys.platform != "win32":
         raise SystemExit("build_win.py is intended to run on Windows.")
@@ -149,6 +156,7 @@ def main() -> int:
     print(f"Version: {version}")
     print("Building with PyInstaller...")
     PyInstaller.__main__.run(_build_args())
+    _trim_dist()
     archive_path = _zip_dist()
     print(f"Build complete: {APP_DIR}")
     print(f"Release archive: {archive_path}")
