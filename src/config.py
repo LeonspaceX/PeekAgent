@@ -42,8 +42,7 @@ PROMPT_DIR = DATA_DIR / "prompt"
 HIGHLIGHT_THEME_PATH = DATA_DIR / "highlight.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 VERSION_PATH = _resolve_packaged_path("version.txt")
-HIGHLIGHT_LIGHT_RESOURCE_PATH = RESOURCE_DIR / "highlight.json"
-HIGHLIGHT_DARK_RESOURCE_PATH = RESOURCE_DIR / "highlight_dark.json"
+HIGHLIGHT_RESOURCE_BUNDLE_PATH = RESOURCE_DIR / "highlight.json"
 
 DEFAULT_SETTINGS = {
     "general": {
@@ -129,12 +128,8 @@ def get_app_version() -> str:
 
 
 def build_default_highlight_theme_bundle() -> dict:
-    light = json.loads(HIGHLIGHT_LIGHT_RESOURCE_PATH.read_text(encoding="utf-8"))
-    dark = json.loads(HIGHLIGHT_DARK_RESOURCE_PATH.read_text(encoding="utf-8"))
-    return {
-        "light": light if isinstance(light, dict) else {},
-        "dark": dark if isinstance(dark, dict) else {},
-    }
+    bundle = load_highlight_theme_bundle(HIGHLIGHT_RESOURCE_BUNDLE_PATH)
+    return bundle or {"light": {}, "dark": {}}
 
 
 def load_highlight_theme_bundle(path: Path = HIGHLIGHT_THEME_PATH) -> dict | None:
