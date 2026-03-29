@@ -41,6 +41,9 @@ CONTEXT_DIR = DATA_DIR / "context"
 PROMPT_DIR = DATA_DIR / "prompt"
 HIGHLIGHT_THEME_PATH = DATA_DIR / "highlight.json"
 SETTINGS_PATH = DATA_DIR / "settings.json"
+VERSION_PATH = _resolve_packaged_path("version.txt")
+HIGHLIGHT_LIGHT_RESOURCE_PATH = RESOURCE_DIR / "highlight.json"
+HIGHLIGHT_DARK_RESOURCE_PATH = RESOURCE_DIR / "highlight_dark.json"
 
 DEFAULT_SETTINGS = {
     "general": {
@@ -113,6 +116,51 @@ def build_initial_settings() -> dict:
     else:
         data["appearance"]["theme_mode"] = "light"
     return data
+
+
+def get_app_version() -> str:
+    if not getattr(sys, "frozen", False):
+        return "development"
+    try:
+        value = VERSION_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return "unknown"
+    return value or "unknown"
+
+
+def build_default_highlight_theme_bundle() -> dict:
+    light = json.loads(HIGHLIGHT_LIGHT_RESOURCE_PATH.read_text(encoding="utf-8"))
+    dark = json.loads(HIGHLIGHT_DARK_RESOURCE_PATH.read_text(encoding="utf-8"))
+    return {
+        "light": light if isinstance(light, dict) else {},
+        "dark": dark if isinstance(dark, dict) else {},
+    }
+
+
+def load_highlight_theme_bundle(path: Path = HIGHLIGHT_THEME_PATH) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    light = data.get("light")
+    dark = data.get("dark")
+    if not isinstance(light, dict) or not isinstance(dark, dict):
+        return None
+    return {"light": light, "dark": dark}
+
+
+def get_highlight_theme_for_mode(dark_mode: bool, path: Path = HIGHLIGHT_THEME_PATH) -> dict:
+    bundle = load_highlight_theme_bundle(path)
+    if bundle is None:
+        try:
+            bundle = build_default_highlight_theme_bundle()
+        except Exception:
+            return {}
+    return bundle["dark" if dark_mode else "light"]
 
 
 class Settings:

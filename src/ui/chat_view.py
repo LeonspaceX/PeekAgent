@@ -9,8 +9,8 @@ from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWidgets import QMenu
-from qfluentwidgets import FluentIcon
-from src.config import HIGHLIGHT_THEME_PATH, RESOURCE_DIR
+from qfluentwidgets import FluentIcon, isDarkTheme
+from src.config import RESOURCE_DIR, get_highlight_theme_for_mode
 
 
 class _ChatBridge(QObject):
@@ -112,13 +112,7 @@ class ChatView(QWebEngineView):
 
     @staticmethod
     def _load_highlight_theme() -> dict:
-        if not HIGHLIGHT_THEME_PATH.exists():
-            return {}
-        try:
-            data = json.loads(HIGHLIGHT_THEME_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return data if isinstance(data, dict) else {}
+        return get_highlight_theme_for_mode(isDarkTheme())
 
     @staticmethod
     def _icon_data_uri(icon) -> str:

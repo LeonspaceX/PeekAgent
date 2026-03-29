@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QSizePolicy, QFileDialog,
     QLabel, QScrollArea,
 )
-from PySide6.QtGui import QKeyEvent, QImage, QPixmap, QDragEnterEvent, QDropEvent
+from PySide6.QtGui import QKeyEvent, QImage, QPixmap, QDragEnterEvent, QDropEvent, QInputMethodEvent
 from qfluentwidgets import PlainTextEdit, PushButton, ToolButton, FluentIcon, InfoBar, InfoBarPosition
 from src.config import Settings
 
@@ -92,11 +92,14 @@ class ChatInput(PlainTextEdit):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setPlaceholderText("输入消息...")
+        self._placeholder_text = "输入消息..."
+        self._has_preedit = False
+        self.setPlaceholderText(self._placeholder_text)
         self.setFixedHeight(36)
         self._min_h = 36
         self._max_h = 120
         self.textChanged.connect(self._adjust_height)
+        self.textChanged.connect(self._sync_placeholder_visibility)
         self.setAcceptDrops(True)
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
         self.setCursorWidth(2)
@@ -105,6 +108,7 @@ class ChatInput(PlainTextEdit):
         self._cursor_refresh_timer = QTimer(self)
         self._cursor_refresh_timer.setSingleShot(True)
         self._cursor_refresh_timer.timeout.connect(self.viewport().update)
+        self._sync_placeholder_visibility()
 
     def keyPressEvent(self, e: QKeyEvent):
         if e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -128,6 +132,15 @@ class ChatInput(PlainTextEdit):
         if new_h != self.height():
             self.setFixedHeight(new_h)
             self.ensureCursorVisible()
+
+    def _sync_placeholder_visibility(self):
+        should_show = not self.toPlainText() and not self._has_preedit
+        self.setPlaceholderText(self._placeholder_text if should_show else "")
+
+    def inputMethodEvent(self, event: QInputMethodEvent):
+        self._has_preedit = bool(event.preeditString())
+        super().inputMethodEvent(event)
+        self._sync_placeholder_visibility()
 
     # --- Drag & drop files ---
 
@@ -410,3 +423,6 @@ class InputArea(QWidget):
     def set_enabled(self, enabled: bool):
         self._controls_enabled = enabled
         self._refresh_control_state()
+
+    def focus_text_input(self):
+        self.text_input.setFocus()

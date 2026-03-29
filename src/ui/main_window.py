@@ -32,6 +32,7 @@ class _GripWidget(QWidget):
 
 class MainWindow(QWidget):
     EDGE_SIZE = 8  # pixels for resize grip
+    WORKER_SHUTDOWN_TIMEOUT_MS = 2000
 
     def __init__(self):
         super().__init__()
@@ -56,6 +57,7 @@ class MainWindow(QWidget):
         self._pending_title_text = ""
         self._title_typing_index = 0
         self._title_typing_session_id = None
+        self._shutdown_done = False
 
         self._save_geo_timer = QTimer(self)
         self._save_geo_timer.setSingleShot(True)
@@ -188,6 +190,9 @@ class MainWindow(QWidget):
             self.show()
             self.raise_()
             self.activateWindow()
+
+    def focus_input(self):
+        self.input_area.focus_text_input()
 
     def _toggle_sidebar(self):
         if self.sidebar._expanded:
@@ -971,6 +976,56 @@ class MainWindow(QWidget):
         self.move(0, 0)
         self._save_geometry()
 
+    def shutdown(self):
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+
+        self._title_typing_timer.stop()
+        self._save_geo_timer.stop()
+        self._tool_queue.clear()
+        self._pending_tool_call = None
+        self._pending_tool_id = None
+        self._tool_flow_stopped = True
+
+        try:
+            self.api_client.cancel()
+        except Exception:
+            pass
+
+        stream_worker = self._stream_worker
+        self._stream_worker = None
+        if stream_worker is not None:
+            try:
+                stream_worker.cancel()
+            except Exception:
+                pass
+            try:
+                stream_worker.wait(self.WORKER_SHUTDOWN_TIMEOUT_MS)
+            except Exception:
+                pass
+
+        tool_worker = self._tool_worker
+        self._tool_worker = None
+        if tool_worker is not None:
+            try:
+                tool_worker.wait(self.WORKER_SHUTDOWN_TIMEOUT_MS)
+            except Exception:
+                pass
+
+        title_worker = self._title_worker
+        self._title_worker = None
+        if title_worker is not None:
+            try:
+                title_worker.wait(self.WORKER_SHUTDOWN_TIMEOUT_MS)
+            except Exception:
+                pass
+
+        try:
+            self.tool_runtime.close()
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._save_geo_timer.start()
@@ -983,5 +1038,5 @@ class MainWindow(QWidget):
         self._save_geo_timer.start()
 
     def closeEvent(self, event):
-        self.tool_runtime.close()
+        self.shutdown()
         super().closeEvent(event)

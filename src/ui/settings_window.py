@@ -4,7 +4,6 @@ import ctypes
 import json
 import math
 import requests
-import shutil
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
@@ -19,7 +18,14 @@ from qfluentwidgets import (
     SwitchButton, SubtitleLabel, StrongBodyLabel, BodyLabel, InfoBar, InfoBarPosition,
     ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, MessageBox, isDarkTheme,
 )
-from src.config import Settings, PROMPT_DIR, HIGHLIGHT_THEME_PATH, RESOURCE_DIR, detect_system_dark_mode
+from src.config import (
+    Settings,
+    PROMPT_DIR,
+    HIGHLIGHT_THEME_PATH,
+    build_default_highlight_theme_bundle,
+    get_app_version,
+    load_highlight_theme_bundle,
+)
 from src.llm_client import LLMClient
 from src.ssh_manager import delete_client_config, list_clients_config, save_clients_config
 from src.ui.highlight_preview import HighlightPreview
@@ -404,6 +410,26 @@ class SettingsWindow(QWidget):
         highlight_row.addWidget(self.import_highlight_btn)
 
         self.restore_highlight_btn = PushButton("恢复默认", self)
+        self.restore_highlight_btn.setStyleSheet("""
+            PushButton {
+                background: #d13438;
+                color: white;
+                border: 1px solid #b42318;
+            }
+            PushButton:hover {
+                background: #b42318;
+                color: white;
+            }
+            PushButton:pressed {
+                background: #8f1d22;
+                color: white;
+            }
+            PushButton:disabled {
+                background: rgba(209, 52, 56, 0.45);
+                color: rgba(255, 255, 255, 0.75);
+                border: 1px solid rgba(180, 35, 24, 0.45);
+            }
+        """)
         self.restore_highlight_btn.clicked.connect(self._restore_default_highlight_theme)
         highlight_row.addWidget(self.restore_highlight_btn)
         form.addRow("代码高亮主题:", highlight_row)
@@ -472,37 +498,13 @@ class SettingsWindow(QWidget):
         }.get((value or "light").strip().lower(), 1)
         self.theme_mode_combo.setCurrentIndex(index)
 
-    def _default_highlight_theme_path(self) -> Path:
-        theme_mode = self._theme_mode_value()
-        use_dark = theme_mode == "dark" or (theme_mode == "auto" and detect_system_dark_mode())
-        return RESOURCE_DIR / ("highlight_dark.json" if use_dark else "highlight.json")
-
     @staticmethod
-    def _load_json_file(path: Path) -> dict | None:
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return None
-        return data if isinstance(data, dict) else None
-
-    def _maybe_sync_default_highlight_theme(self):
-        target_path = self._default_highlight_theme_path()
-        current_theme = self._load_json_file(HIGHLIGHT_THEME_PATH)
-        target_theme = self._load_json_file(target_path)
-        if current_theme is None or target_theme is None:
-            return
-        if current_theme == target_theme:
-            return
-
-        light_theme = self._load_json_file(RESOURCE_DIR / "highlight.json")
-        dark_theme = self._load_json_file(RESOURCE_DIR / "highlight_dark.json")
-        if current_theme != light_theme and current_theme != dark_theme:
-            return
-
+    def _save_highlight_theme_bundle(bundle: dict):
         HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(target_path, HIGHLIGHT_THEME_PATH)
+        HIGHLIGHT_THEME_PATH.write_text(
+            json.dumps(bundle, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _build_model_page(self) -> QWidget:
         page = QWidget()
@@ -831,8 +833,20 @@ class SettingsWindow(QWidget):
         layout.setSpacing(12)
 
         layout.addWidget(SubtitleLabel("关于 PeekAgent"))
-        layout.addWidget(BodyLabel("版本: 0.1.0"))
+        layout.addWidget(BodyLabel(f"版本: {get_app_version()}"))
         layout.addWidget(BodyLabel("快速唤起的悬浮 AI 助手"))
+
+        author_label = QLabel('作者：<a href="https://leonxie.cn">Leonxie</a>', page)
+        author_label.setOpenExternalLinks(True)
+        author_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        layout.addWidget(author_label)
+
+        repo_label = QLabel('仓库地址：<a href="https://github.com/LeonspaceX/PeekAgent">https://github.com/LeonspaceX/PeekAgent</a>', page)
+        repo_label.setOpenExternalLinks(True)
+        repo_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        repo_label.setWordWrap(True)
+        layout.addWidget(repo_label)
+
         layout.addStretch()
 
         return page
@@ -873,7 +887,6 @@ class SettingsWindow(QWidget):
                 s.get("appearance", "theme_color_2", "#7c3aed"),
                 "#7c3aed",
             )
-            self._maybe_sync_default_highlight_theme()
             self._refresh_highlight_preview()
 
             self.endpoint_url_edit.setText(s.get("model", "endpoint_url", ""))
@@ -955,22 +968,25 @@ class SettingsWindow(QWidget):
             InfoBar.error("导入失败", "高亮主题必须是一个对象型 JSON", parent=self,
                           position=InfoBarPosition.TOP, duration=5000)
             return
+        bundle = load_highlight_theme_bundle(Path(file_path))
+        if bundle is None:
+            InfoBar.error("导入失败", "高亮主题必须包含 `light` 和 `dark` 两个对象。", parent=self,
+                          position=InfoBarPosition.TOP, duration=5000)
+            return
 
-        HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(file_path, HIGHLIGHT_THEME_PATH)
+        self._save_highlight_theme_bundle(bundle)
         self.highlight_preview.apply_highlight_theme()
         InfoBar.success("导入成功", "已覆盖 data/highlight.json", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
         self.settings_saved.emit()
 
     def _restore_default_highlight_theme(self):
-        default_theme_path = self._default_highlight_theme_path()
-        if not default_theme_path.exists():
-            InfoBar.error("恢复失败", "默认高亮主题不存在", parent=self,
-                          position=InfoBarPosition.TOP, duration=5000)
+        dialog = MessageBox("恢复默认高亮主题", "确定要恢复默认代码高亮主题吗？当前自定义配置会被覆盖。", self)
+        dialog.yesButton.setText("恢复默认")
+        dialog.cancelButton.setText("取消")
+        if not dialog.exec():
             return
-        HIGHLIGHT_THEME_PATH.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(default_theme_path, HIGHLIGHT_THEME_PATH)
+        self._save_highlight_theme_bundle(build_default_highlight_theme_bundle())
         self.highlight_preview.apply_highlight_theme()
         InfoBar.success("恢复成功", "已恢复默认高亮主题", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
@@ -1012,7 +1028,6 @@ class SettingsWindow(QWidget):
         if self._loading_values:
             return
         self.settings.set("appearance", "theme_mode", self._theme_mode_value())
-        self._maybe_sync_default_highlight_theme()
         self.highlight_preview.apply_theme(isDarkTheme())
         self.settings_saved.emit()
 

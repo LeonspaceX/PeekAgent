@@ -4,3 +4,4 @@ data/
 build/
 dist/
 release/
+version.txt

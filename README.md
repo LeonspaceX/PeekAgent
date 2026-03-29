@@ -84,6 +84,7 @@ PeekAgent 当前支持两类端点：
 - `web-search`：通过 Tavily 搜索网页结果
 - `web-fetch`：抓取网页正文并转换为 Markdown
 - `clipboard`：写入文本或文件列表到系统剪贴板
+- `client_list`，`client_connect`，`client_command`，`client_disconnect`：SSH远程执行
 
 工具协议文档位于 [`src/resources/TOOLS.md`](src/resources/TOOLS.md)。
 

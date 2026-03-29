@@ -4,6 +4,7 @@ import json
 import sys
 import os
 import shutil
+import threading
 
 
 def _append_chromium_flag(flag: str):
@@ -19,7 +20,7 @@ _append_chromium_flag("--disable-direct-composition")
 _append_chromium_flag("--disable-features=DirectComposition")
 
 # Ensure data directories exist and seed default prompt files
-from src.config import BASE_DIR, ICON_PATH, RESOURCE_DIR, SETTINGS_PATH, build_initial_settings, detect_system_dark_mode
+from src.config import BASE_DIR, ICON_PATH, SETTINGS_PATH, build_initial_settings, build_default_highlight_theme_bundle
 
 for d in ["data/context", "data/prompt"]:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
@@ -43,8 +44,10 @@ for name, src in _defaults.items():
 
 _highlight_dest = _data_dir / "highlight.json"
 if not _highlight_dest.exists():
-    highlight_name = "highlight_dark.json" if detect_system_dark_mode() else "highlight.json"
-    shutil.copy2(RESOURCE_DIR / highlight_name, _highlight_dest)
+    _highlight_dest.write_text(
+        json.dumps(build_default_highlight_theme_bundle(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 if not SETTINGS_PATH.exists():
     SETTINGS_PATH.write_text(
@@ -54,7 +57,7 @@ if not SETTINGS_PATH.exists():
 
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QObject, Qt, Signal, QLocale
+from PySide6.QtCore import QObject, Qt, Signal, QLocale, QTimer
 import keyboard
 from qfluentwidgets import FluentTranslator, Theme, isDarkTheme, setTheme, setThemeColor
 
@@ -83,8 +86,10 @@ class PeekAgentApp:
         self.settings_window = None
         self._hotkey_handle = None
         self._registered_hotkey = None
+        self._shutdown_lock = threading.Lock()
+        self._shutting_down = False
         self.hotkey_bridge = _HotkeyBridge()
-        self.hotkey_bridge.activated.connect(self._toggle_window)
+        self.hotkey_bridge.activated.connect(self._toggle_window_from_hotkey)
 
         self._setup_tray()
         self._setup_hotkey()
@@ -150,11 +155,26 @@ class PeekAgentApp:
             self.main_window.activateWindow()
             self.main_window.raise_()
 
+    def _toggle_window_from_hotkey(self):
+        if self._shutting_down:
+            return
+        if self.main_window.isVisible():
+            self.main_window.hide()
+            return
+        self.main_window.show()
+        self.main_window.activateWindow()
+        self.main_window.raise_()
+        QTimer.singleShot(0, self.main_window.focus_input)
+
     def _on_tray_activated(self, reason):
+        if self._shutting_down:
+            return
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self._toggle_window()
 
     def _open_settings(self):
+        if self._shutting_down:
+            return
         if self.settings_window is None or not self.settings_window.isVisible():
             self.settings_window = SettingsWindow()
             self.settings_window.settings_saved.connect(self._setup_hotkey)
@@ -181,10 +201,50 @@ class PeekAgentApp:
         if self.settings_window is not None:
             self.settings_window.apply_theme(isDarkTheme())
 
+    def _release_hotkey(self):
+        if self._hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+            self._hotkey_handle = None
+        self._registered_hotkey = None
+
+    def _graceful_quit(self):
+        with self._shutdown_lock:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+
+        try:
+            self._release_hotkey()
+
+            if self.settings_window is not None:
+                try:
+                    self.settings_window.close()
+                except Exception:
+                    pass
+
+            if self.main_window is not None:
+                try:
+                    self.main_window.shutdown()
+                except Exception:
+                    pass
+                try:
+                    self.main_window.close()
+                except Exception:
+                    pass
+
+            if hasattr(self, "tray"):
+                try:
+                    self.tray.hide()
+                except Exception:
+                    pass
+        finally:
+            self.app.quit()
+
     def _quit(self):
-        keyboard.unhook_all()
-        self.tray.hide()
-        self.app.quit()
+        self._graceful_quit()
 
     def run(self) -> int:
         return self.app.exec()
@@ -195,4 +255,12 @@ if __name__ == "__main__":
     if helper_exit_code is not None:
         sys.exit(helper_exit_code)
     app = PeekAgentApp()
-    sys.exit(app.run())
+    exit_code = 0
+    try:
+        exit_code = app.run()
+    except KeyboardInterrupt:
+        app._graceful_quit()
+        exit_code = 0
+    finally:
+        app._graceful_quit()
+    sys.exit(exit_code)

@@ -5,7 +5,7 @@ a = Analysis(
     ['E:\\PeekAgent\\main.py'],
     pathex=[],
     binaries=[],
-    datas=[('E:\\PeekAgent\\src\\resources', 'src/resources'), ('E:\\PeekAgent\\icon.png', '.'), ('E:\\PeekAgent\\icon.ico', '.')],
+    datas=[('E:\\PeekAgent\\src\\resources', 'src/resources'), ('E:\\PeekAgent\\version.txt', '.'), ('E:\\PeekAgent\\icon.png', '.'), ('E:\\PeekAgent\\icon.ico', '.')],
     hiddenimports=['PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets', 'PySide6.QtWebChannel'],
     hookspath=[],
     hooksconfig={},

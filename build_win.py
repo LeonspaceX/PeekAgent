@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ DIST_DIR = ROOT_DIR / "dist"
 BUILD_DIR = ROOT_DIR / "build"
 APP_DIR = DIST_DIR / APP_NAME
 ARCHIVE_PATH = DIST_DIR / f"{ARCHIVE_NAME}.zip"
+CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
+VERSION_PATH = ROOT_DIR / "version.txt"
 
 QT_MODULE_EXCLUDES = [
     "PySide6.Qt3DAnimation",
@@ -68,6 +71,8 @@ def _data_args() -> list[str]:
     entries: list[tuple[Path, str]] = [
         (ROOT_DIR / "src" / "resources", "src/resources"),
     ]
+    if VERSION_PATH.exists():
+        entries.append((VERSION_PATH, "."))
     for icon_name in ("icon.png", "icon.ico"):
         icon_path = ROOT_DIR / icon_name
         if icon_path.exists():
@@ -111,6 +116,23 @@ def _clean() -> None:
         ARCHIVE_PATH.unlink()
 
 
+def _extract_version() -> str:
+    if not CHANGELOG_PATH.exists():
+        return "development"
+    first_line = CHANGELOG_PATH.read_text(encoding="utf-8").splitlines()[0].strip()
+    if not first_line:
+        return "development"
+    version = re.sub(r"^\s*#+\s*", "", first_line).strip()
+    version = re.sub(r"^\[(.*)\]$", r"\1", version).strip()
+    return version or "development"
+
+
+def _write_version_file() -> str:
+    version = _extract_version()
+    VERSION_PATH.write_text(version + "\n", encoding="utf-8")
+    return version
+
+
 def _zip_dist() -> Path:
     archive_base = DIST_DIR / ARCHIVE_NAME
     shutil.make_archive(str(archive_base), "zip", root_dir=DIST_DIR, base_dir=APP_NAME)
@@ -123,6 +145,8 @@ def main() -> int:
 
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     _clean()
+    version = _write_version_file()
+    print(f"Version: {version}")
     print("Building with PyInstaller...")
     PyInstaller.__main__.run(_build_args())
     archive_path = _zip_dist()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 
 from PySide6.QtCore import QFileSystemWatcher, QTimer, Qt
@@ -17,7 +16,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QFrame, QPlainTextEdit
 from qfluentwidgets import isDarkTheme
 
-from src.config import HIGHLIGHT_THEME_PATH
+from src.config import HIGHLIGHT_THEME_PATH, get_highlight_theme_for_mode
 
 
 _PREVIEW_CODE = """#include <iostream>
@@ -97,16 +96,6 @@ class HighlightPreview(QPlainTextEdit):
         self._refresh_watched_paths()
         self.apply_theme()
 
-    @staticmethod
-    def _load_highlight_theme() -> dict:
-        if not HIGHLIGHT_THEME_PATH.exists():
-            return {}
-        try:
-            data = json.loads(HIGHLIGHT_THEME_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return data if isinstance(data, dict) else {}
-
     def _refresh_watched_paths(self):
         directory = str(HIGHLIGHT_THEME_PATH.parent)
         if directory and directory not in self._watcher.directories():
@@ -127,7 +116,7 @@ class HighlightPreview(QPlainTextEdit):
     def apply_theme(self, dark_mode: bool | None = None):
         dark_mode = isDarkTheme() if dark_mode is None else dark_mode
         self._refresh_watched_paths()
-        theme = self._load_highlight_theme()
+        theme = get_highlight_theme_for_mode(dark_mode)
         base = theme.get("base") if isinstance(theme, dict) else {}
 
         fallback_text = "#d6deeb" if dark_mode else "#1f2937"
