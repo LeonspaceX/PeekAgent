@@ -5,6 +5,7 @@ import sys
 import os
 import shutil
 import threading
+import subprocess
 
 
 def _append_chromium_flag(flag: str):
@@ -65,6 +66,18 @@ from src.config import Settings
 from src.startup_manager import maybe_handle_startup_helper
 from src.ui.main_window import MainWindow
 from src.ui.settings_window import SettingsWindow
+from src.ui.update_window import UpdateCompleteDialog
+
+
+def _extract_update_finish_arg(argv: list[str]) -> tuple[str | None, list[str]]:
+    update_finish_version = None
+    filtered = [argv[0]]
+    for item in argv[1:]:
+        if item.startswith("--update-finish="):
+            update_finish_version = item.split("=", 1)[1].strip()
+            continue
+        filtered.append(item)
+    return update_finish_version, filtered
 
 
 class _HotkeyBridge(QObject):
@@ -72,8 +85,8 @@ class _HotkeyBridge(QObject):
 
 
 class PeekAgentApp:
-    def __init__(self):
-        self.app = QApplication(sys.argv)
+    def __init__(self, argv: list[str], update_finish_version: str | None = None):
+        self.app = QApplication(argv)
         self.app.setQuitOnLastWindowClosed(False)
         self._fluent_translator = FluentTranslator(QLocale("zh_CN"), self.app)
         self.app.installTranslator(self._fluent_translator)
@@ -88,6 +101,7 @@ class PeekAgentApp:
         self._registered_hotkey = None
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
+        self._update_finish_version = update_finish_version
         self.hotkey_bridge = _HotkeyBridge()
         self.hotkey_bridge.activated.connect(self._toggle_window_from_hotkey)
 
@@ -96,6 +110,8 @@ class PeekAgentApp:
         self._apply_theme()
 
         self.main_window.show()
+        if self._update_finish_version:
+            QTimer.singleShot(300, self._show_update_complete_dialog)
 
     def _setup_tray(self):
         icon = QIcon(str(ICON_PATH)) if ICON_PATH.exists() else QIcon()
@@ -180,6 +196,7 @@ class PeekAgentApp:
             self.settings_window.settings_saved.connect(self._setup_hotkey)
             self.settings_window.settings_saved.connect(self._apply_theme)
             self.settings_window.always_on_top_changed.connect(self.main_window.set_always_on_top)
+            self.settings_window.update_apply_requested.connect(self._launch_update_and_quit)
             self.settings_window.reset_window_requested.connect(
                 self.main_window.reset_geometry_to_default
             )
@@ -243,6 +260,26 @@ class PeekAgentApp:
         finally:
             self.app.quit()
 
+    def _launch_update_and_quit(self, batch_path: str):
+        try:
+            creation_flags = 0
+            if os.name == "nt":
+                creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+            subprocess.Popen(
+                ["cmd", "/c", batch_path],
+                creationflags=creation_flags,
+                close_fds=False,
+            )
+        except Exception as exc:
+            if self.settings_window is not None:
+                self.settings_window.update_status_label.setText(f"启动升级脚本失败：{exc}")
+            return
+        self._graceful_quit()
+
+    def _show_update_complete_dialog(self):
+        dialog = UpdateCompleteDialog(self._update_finish_version or "", self.main_window)
+        dialog.exec()
+
     def _quit(self):
         self._graceful_quit()
 
@@ -251,10 +288,11 @@ class PeekAgentApp:
 
 
 if __name__ == "__main__":
-    helper_exit_code = maybe_handle_startup_helper(sys.argv[1:])
+    update_finish_version, qt_argv = _extract_update_finish_arg(sys.argv)
+    helper_exit_code = maybe_handle_startup_helper(qt_argv[1:])
     if helper_exit_code is not None:
         sys.exit(helper_exit_code)
-    app = PeekAgentApp()
+    app = PeekAgentApp(qt_argv, update_finish_version=update_finish_version)
     exit_code = 0
     try:
         exit_code = app.run()

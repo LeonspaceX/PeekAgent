@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
         "auto_start": False,
         "always_on_top": True,
         "external_prompt_editor_enabled": False,
+        "github_mirror": "https://v6.gh-proxy.org/",
     },
     "appearance": {
         "theme_mode": "light",

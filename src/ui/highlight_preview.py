@@ -122,7 +122,6 @@ class HighlightPreview(QPlainTextEdit):
         fallback_text = "#d6deeb" if dark_mode else "#1f2937"
         fallback_background = "#0f1720" if dark_mode else "#f7f8fa"
         border_color = "rgba(255, 255, 255, 0.10)" if dark_mode else "rgba(0, 0, 0, 0.08)"
-
         text_color = QColor((base or {}).get("color", fallback_text))
         background_color = QColor((base or {}).get("background", fallback_background))
         selection_color = QColor((base or {}).get("selection", "rgba(14, 165, 164, 0.18)"))
@@ -155,3 +154,4 @@ class HighlightPreview(QPlainTextEdit):
 
     def apply_highlight_theme(self):
         self.apply_theme()
+

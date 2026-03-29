@@ -536,6 +536,12 @@ function withAlpha(color, alpha) {
 
 function setActionIcons(icons) {
   actionIcons = icons || actionIcons;
+  document.querySelectorAll('[data-icon-key]').forEach(el => {
+    const key = el.dataset.iconKey;
+    if (!key || !actionIcons[key]) return;
+    const img = el.tagName === 'IMG' ? el : el.querySelector('img');
+    if (img) img.src = actionIcons[key];
+  });
 }
 
 function setHighlightTheme(theme) {
@@ -760,6 +766,7 @@ function createToolCard(payload) {
 
   const icon = document.createElement('img');
   icon.className = 'tool-icon';
+  icon.dataset.iconKey = toolIconKey(payload.toolName);
   icon.src = actionIcons[toolIconKey(payload.toolName)] || '';
   icon.alt = payload.title || payload.toolName;
   header.appendChild(icon);

@@ -58,6 +58,7 @@ class ChatView(QWebEngineView):
         super().__init__(parent)
         self._loaded = False
         self._pending_js: list[str] = []
+        self._dark_mode = isDarkTheme()
         self.setPage(_ChatPage(self))
         self._channel = QWebChannel(self.page())
         self._bridge = _ChatBridge(self)
@@ -68,7 +69,7 @@ class ChatView(QWebEngineView):
         self._bridge.regenerateRequested.connect(self.regenerate_requested)
         self._bridge.toolApprovalRequested.connect(self.tool_approval_requested)
         # Prevent flicker when parent has WA_TranslucentBackground
-        self.page().setBackgroundColor(QColor(255, 255, 255))
+        self.page().setBackgroundColor(QColor("#181818") if self._dark_mode else QColor(255, 255, 255))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
         html_path = RESOURCE_DIR / "chat.html"
@@ -110,9 +111,8 @@ class ChatView(QWebEngineView):
         theme = self._load_highlight_theme()
         return f"setHighlightTheme({json.dumps(theme, ensure_ascii=False)});"
 
-    @staticmethod
-    def _load_highlight_theme() -> dict:
-        return get_highlight_theme_for_mode(isDarkTheme())
+    def _load_highlight_theme(self) -> dict:
+        return get_highlight_theme_for_mode(self._dark_mode)
 
     @staticmethod
     def _icon_data_uri(icon) -> str:
@@ -157,10 +157,12 @@ class ChatView(QWebEngineView):
         self._run_js("clearChat();")
 
     def set_theme(self, primary_color: str, user_color: str, ai_color: str, dark_mode: bool = False):
-        self.page().setBackgroundColor(QColor("#181818") if dark_mode else QColor(255, 255, 255))
+        self._dark_mode = bool(dark_mode)
+        self.page().setBackgroundColor(QColor("#181818") if self._dark_mode else QColor(255, 255, 255))
         self._run_js(
-            f"setTheme({self._to_js_arg(primary_color)}, {self._to_js_arg(user_color)}, {self._to_js_arg(ai_color)}, {json.dumps(bool(dark_mode))});"
+            f"setTheme({self._to_js_arg(primary_color)}, {self._to_js_arg(user_color)}, {self._to_js_arg(ai_color)}, {json.dumps(self._dark_mode)});"
         )
+        self._run_js(self._build_icons_script())
 
     def apply_highlight_theme(self):
         self._run_js(self._build_highlight_theme_script())

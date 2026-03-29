@@ -17,8 +17,10 @@ from qfluentwidgets import (
     LineEdit, ComboBox, PushButton, ToolButton, FluentIcon,
     SwitchButton, SubtitleLabel, StrongBodyLabel, BodyLabel, InfoBar, InfoBarPosition,
     ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, MessageBox, isDarkTheme,
+    setCustomStyleSheet, FluentThemeColor,
 )
 from src.config import (
+    BASE_DIR,
     Settings,
     PROMPT_DIR,
     HIGHLIGHT_THEME_PATH,
@@ -28,7 +30,9 @@ from src.config import (
 )
 from src.llm_client import LLMClient
 from src.ssh_manager import delete_client_config, list_clients_config, save_clients_config
+from src.update_manager import ReleaseInfo, compare_versions, fetch_latest_release_info
 from src.ui.highlight_preview import HighlightPreview
+from src.ui.update_window import UpdateDialog
 from src.startup_manager import request_auto_start_update
 
 
@@ -240,12 +244,17 @@ class SettingsWindow(QWidget):
     settings_saved = Signal()
     reset_window_requested = Signal()
     always_on_top_changed = Signal(bool)
+    update_apply_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.settings = Settings()
         self._loading_values = False
         self._changing_auto_start = False
+        self._update_check_worker = None
+        self._update_check_in_flight = False
+        self._latest_release_info: ReleaseInfo | None = None
+        self._update_dialog = None
         self.setObjectName("settingsWindow")
         self.setWindowTitle("PeekAgent 设置")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -282,6 +291,8 @@ class SettingsWindow(QWidget):
 
     def _switch_page(self, index: int):
         self.stack.setCurrentIndex(index)
+        if index == 7:
+            self._maybe_check_update()
 
     def _wrap_scroll(self, page: QWidget) -> QScrollArea:
         page.setObjectName("settingsPage")
@@ -368,6 +379,9 @@ class SettingsWindow(QWidget):
 
         self.external_prompt_editor_switch = SwitchButton(self)
         form.addRow("外部prompt编辑:", self.external_prompt_editor_switch)
+        self.github_mirror_edit = LineEdit(self)
+        self.github_mirror_edit.setPlaceholderText("留空则直连 GitHub")
+        form.addRow("GitHub 镜像前缀:", self.github_mirror_edit)
 
         return page
 
@@ -410,26 +424,36 @@ class SettingsWindow(QWidget):
         highlight_row.addWidget(self.import_highlight_btn)
 
         self.restore_highlight_btn = PushButton("恢复默认", self)
-        self.restore_highlight_btn.setStyleSheet("""
-            PushButton {
-                background: #d13438;
+        self.restore_highlight_btn.setProperty("isDanger", True)
+        danger_base = FluentThemeColor.BRICK_RED.value
+        danger_hover = FluentThemeColor.PALE_RED.value
+        danger_pressed = FluentThemeColor.RED.value
+        danger_qss = f"""
+            PushButton[isDanger=true] {{
                 color: white;
-                border: 1px solid #b42318;
-            }
-            PushButton:hover {
-                background: #b42318;
-                color: white;
-            }
-            PushButton:pressed {
-                background: #8f1d22;
-                color: white;
-            }
-            PushButton:disabled {
-                background: rgba(209, 52, 56, 0.45);
+                background: {danger_base};
+                border: 1px solid {danger_base};
+                border-bottom: 1px solid {danger_pressed};
+            }}
+            PushButton[isDanger=true]:hover {{
+                background: {danger_hover};
+                border: 1px solid {danger_hover};
+                border-bottom: 1px solid {danger_pressed};
+            }}
+            PushButton[isDanger=true]:pressed {{
+                color: rgba(255, 255, 255, 0.85);
+                background: {danger_pressed};
+                border: 1px solid {danger_pressed};
+                border-bottom: 1px solid {danger_pressed};
+            }}
+            PushButton[isDanger=true]:disabled {{
                 color: rgba(255, 255, 255, 0.75);
-                border: 1px solid rgba(180, 35, 24, 0.45);
-            }
-        """)
+                background: rgba(209, 52, 56, 0.45);
+                border: 1px solid rgba(209, 52, 56, 0.45);
+                border-bottom: 1px solid rgba(143, 29, 34, 0.45);
+            }}
+        """
+        setCustomStyleSheet(self.restore_highlight_btn, danger_qss, danger_qss)
         self.restore_highlight_btn.clicked.connect(self._restore_default_highlight_theme)
         highlight_row.addWidget(self.restore_highlight_btn)
         form.addRow("代码高亮主题:", highlight_row)
@@ -825,6 +849,65 @@ class SettingsWindow(QWidget):
         InfoBar.success("已重置", "窗口位置已恢复到 (0, 0)，大小已恢复到 600 x 800", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
 
+    def _maybe_check_update(self):
+        local_version = get_app_version()
+        if local_version in {"development", "unknown"}:
+            self._latest_release_info = None
+            self.update_btn.hide()
+            return
+        if self._update_check_in_flight:
+            return
+
+        self._update_check_in_flight = True
+        self.update_btn.hide()
+        self._update_check_worker = _AsyncWorker(fetch_latest_release_info, self)
+        self._update_check_worker.finished.connect(self._on_update_check_finished)
+        self._update_check_worker.errored.connect(self._on_update_check_failed)
+        self._update_check_worker.start()
+
+    def _on_update_check_finished(self, release_info: ReleaseInfo):
+        self._update_check_in_flight = False
+        self._latest_release_info = release_info
+        local_version = get_app_version()
+        try:
+            comparison = compare_versions(local_version, release_info.version)
+        except Exception:
+            self.update_btn.hide()
+            return
+        if comparison < 0:
+            self.update_btn.show()
+            self.update_btn.setToolTip(f"发现新版本 {release_info.version}")
+            return
+        self.update_btn.hide()
+
+    def _on_update_check_failed(self, err: str):
+        self._update_check_in_flight = False
+        self._latest_release_info = None
+        self.update_btn.hide()
+
+    def _open_update_dialog(self):
+        if self._latest_release_info is None:
+            return
+        local_version = get_app_version()
+        try:
+            comparison = compare_versions(local_version, self._latest_release_info.version)
+        except Exception:
+            self.update_btn.hide()
+            return
+        if comparison >= 0:
+            self.update_btn.hide()
+            return
+        self._update_dialog = UpdateDialog(
+            current_version=local_version,
+            release_info=self._latest_release_info,
+            mirror_prefix=self.github_mirror_edit.text().strip(),
+            app_dir=str(BASE_DIR),
+            executable_path=str(BASE_DIR / "PeekAgent.exe"),
+            parent=self,
+        )
+        self._update_dialog.update_apply_requested.connect(lambda batch_path: self.update_apply_requested.emit(batch_path))
+        self._update_dialog.show()
+
     def _build_about_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("settingsPage")
@@ -833,7 +916,17 @@ class SettingsWindow(QWidget):
         layout.setSpacing(12)
 
         layout.addWidget(SubtitleLabel("关于 PeekAgent"))
-        layout.addWidget(BodyLabel(f"版本: {get_app_version()}"))
+        version_row = QHBoxLayout()
+        version_row.setSpacing(8)
+        self.about_version_label = BodyLabel(f"版本: {get_app_version()}", page)
+        version_row.addWidget(self.about_version_label)
+        self.update_btn = ToolButton(FluentIcon.UPDATE, page)
+        self.update_btn.setToolTip("发现新版本")
+        self.update_btn.hide()
+        self.update_btn.clicked.connect(self._open_update_dialog)
+        version_row.addWidget(self.update_btn)
+        version_row.addStretch(1)
+        layout.addLayout(version_row)
         layout.addWidget(BodyLabel("快速唤起的悬浮 AI 助手"))
 
         author_label = QLabel('作者：<a href="https://leonxie.cn">Leonxie</a>', page)
@@ -867,6 +960,7 @@ class SettingsWindow(QWidget):
             self.external_prompt_editor_switch.setChecked(
                 s.get("general", "external_prompt_editor_enabled", False)
             )
+            self.github_mirror_edit.setText(s.get("general", "github_mirror", "https://v6.gh-proxy.org/"))
 
             self._set_color_picker_value(
                 self.primary_theme_color_button,
@@ -923,6 +1017,7 @@ class SettingsWindow(QWidget):
         s.set("general", "hotkey", self.hotkey_edit.text())
         s.set("general", "always_on_top", self.always_top_switch.isChecked())
         s.set("general", "external_prompt_editor_enabled", self.external_prompt_editor_switch.isChecked())
+        s.set("general", "github_mirror", self.github_mirror_edit.text().strip())
 
         s.set("appearance", "theme_mode", self._theme_mode_value())
         s.set("appearance", "primary_theme_color", self._color_picker_value(self.primary_theme_color_button))
