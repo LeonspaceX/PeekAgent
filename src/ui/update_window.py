@@ -65,9 +65,9 @@ class UpdateWorker(QThread):
         self._ensure_not_cancelled()
         package_dir = self._extract_archive(archive_path, extract_root)
         self._ensure_not_cancelled()
-        batch_path = self._write_update_script(temp_root, package_dir, archive_path)
+        script_path = self._write_update_script(temp_root, package_dir, archive_path)
         self.stage_changed.emit("收尾", 100, "更新脚本已准备完成，正在退出程序...")
-        self.ready.emit(str(batch_path), self._release_info.version)
+        self.ready.emit(str(script_path), self._release_info.version)
 
     def _download_archive(self, archive_path: Path):
         download_url = build_mirrored_url(self._release_info.download_url, self._mirror_prefix)
@@ -144,47 +144,142 @@ class UpdateWorker(QThread):
 
     def _write_update_script(self, temp_root: Path, package_dir: Path, archive_path: Path) -> Path:
         self.stage_changed.emit("收尾", 10, "正在准备升级脚本...")
-        script_path = temp_root / "peekagent_apply_update.bat"
+        script_path = temp_root / "peekagent_apply_update.ps1"
         version = self._release_info.version
         script = textwrap.dedent(
             f"""\
-            @echo off
-            setlocal enableextensions
+            $ErrorActionPreference = "Stop"
+            [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
-            set "APP_DIR={self._app_dir}"
-            set "PACKAGE_DIR={package_dir}"
-            set "ARCHIVE_PATH={archive_path}"
-            set "SCRIPT_PATH=%~f0"
-            set "TARGET_EXE={self._executable_path}"
-            set "TARGET_PID={self._current_pid}"
+            $AppDir = "{self._app_dir}"
+            $PackageDir = "{package_dir}"
+            $ArchivePath = "{archive_path}"
+            $ScriptPath = $MyInvocation.MyCommand.Path
+            $TargetExe = "{self._executable_path}"
+            $TargetPid = {self._current_pid}
+            $Version = "{version}"
 
-            :wait_process
-            tasklist /FI "PID eq %TARGET_PID%" | find "%TARGET_PID%" >nul
-            if not errorlevel 1 (
-                timeout /t 2 /nobreak >nul
-                goto wait_process
-            )
+            function Show-ProgressLine {{
+                param(
+                    [int]$Percent,
+                    [string]$CurrentItem
+                )
 
-            timeout /t 2 /nobreak >nul
+                $width = 30
+                $filled = [Math]::Min($width, [Math]::Floor($Percent * $width / 100))
+                $bar = ("#" * $filled).PadRight($width, "-")
+                $suffix = if ([string]::IsNullOrWhiteSpace($CurrentItem)) {{ "" }} else {{ " " + $CurrentItem }}
+                Write-Host -NoNewline ("`r[{0}] {1,3}%{2}" -f $bar, $Percent, $suffix)
+            }}
 
-            robocopy "%PACKAGE_DIR%" "%APP_DIR%" /E /IS /IT /R:2 /W:1 /NFL /NDL /NJH /NJS /NP >nul
-            set "ROBOCOPY_EXIT=%ERRORLEVEL%"
-            if %ROBOCOPY_EXIT% GEQ 8 (
-                echo 更新失败：覆盖文件时 robocopy 返回 %ROBOCOPY_EXIT%
-                pause
-                exit /b %ROBOCOPY_EXIT%
-            )
+            try {{
+                while (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue) {{
+                    Start-Sleep -Seconds 2
+                }}
 
-            start "" "%TARGET_EXE%" --update-finish={version}
+                Start-Sleep -Seconds 2
+                Write-Host "正在应用更新，请勿关闭此窗口..."
 
-            timeout /t 2 /nobreak >nul
-            rmdir /s /q "{package_dir}" >nul 2>nul
-            del /f /q "{archive_path}" >nul 2>nul
-            del /f /q "%SCRIPT_PATH%" >nul 2>nul
-            exit /b 0
+                $sourceRoot = [System.IO.Path]::GetFullPath($PackageDir)
+                $destinationRoot = [System.IO.Path]::GetFullPath($AppDir)
+
+                if (-not (Test-Path -LiteralPath $sourceRoot)) {{
+                    throw "更新源目录不存在：$sourceRoot"
+                }}
+
+                New-Item -ItemType Directory -Force -Path $destinationRoot | Out-Null
+
+                foreach ($dir in Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force -Directory) {{
+                    $relativeDir = $dir.FullName.Substring($sourceRoot.Length).TrimStart('\')
+                    if ($relativeDir) {{
+                        New-Item -ItemType Directory -Force -Path (Join-Path $destinationRoot $relativeDir) | Out-Null
+                    }}
+                }}
+
+                $files = @(Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force -File)
+                [long]$totalBytes = 0
+                foreach ($file in $files) {{
+                    $totalBytes += $file.Length
+                }}
+
+                if ($files.Count -eq 0) {{
+                    Show-ProgressLine -Percent 100 -CurrentItem "没有需要复制的文件"
+                    Write-Host ""
+                }} else {{
+                    [long]$copiedBytes = 0
+                    $buffer = New-Object byte[] (1024 * 1024)
+
+                    foreach ($file in $files) {{
+                        $relativePath = $file.FullName.Substring($sourceRoot.Length).TrimStart('\')
+                        $targetPath = Join-Path $destinationRoot $relativePath
+                        $targetParent = Split-Path -Parent $targetPath
+                        if ($targetParent) {{
+                            New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
+                        }}
+
+                        if (Test-Path -LiteralPath $targetPath) {{
+                            $existingItem = Get-Item -LiteralPath $targetPath
+                            if (-not $existingItem.PSIsContainer -and $existingItem.Length -eq $file.Length) {{
+                                $copiedBytes += $file.Length
+                                $percent = if ($totalBytes -gt 0) {{ [Math]::Min(100, [int]($copiedBytes * 100 / $totalBytes)) }} else {{ 100 }}
+                                Show-ProgressLine -Percent $percent -CurrentItem ($relativePath + " (跳过)")
+                                continue
+                            }}
+                        }}
+
+                        if ($file.Length -eq 0) {{
+                            [System.IO.File]::WriteAllBytes($targetPath, [byte[]]::new(0))
+                            $targetItem = Get-Item -LiteralPath $targetPath
+                            $targetItem.LastWriteTime = $file.LastWriteTime
+                            $targetItem.Attributes = $file.Attributes
+                            $percent = if ($totalBytes -gt 0) {{ [Math]::Min(100, [int]($copiedBytes * 100 / $totalBytes)) }} else {{ 100 }}
+                            Show-ProgressLine -Percent $percent -CurrentItem $relativePath
+                            continue
+                        }}
+
+                        $sourceStream = $null
+                        $targetStream = $null
+                        try {{
+                            $sourceStream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                            $targetStream = [System.IO.File]::Open($targetPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+
+                            while (($read = $sourceStream.Read($buffer, 0, $buffer.Length)) -gt 0) {{
+                                $targetStream.Write($buffer, 0, $read)
+                                $copiedBytes += $read
+                                $percent = if ($totalBytes -gt 0) {{ [Math]::Min(100, [int]($copiedBytes * 100 / $totalBytes)) }} else {{ 100 }}
+                                Show-ProgressLine -Percent $percent -CurrentItem $relativePath
+                            }}
+                        }} finally {{
+                            if ($targetStream) {{ $targetStream.Dispose() }}
+                            if ($sourceStream) {{ $sourceStream.Dispose() }}
+                        }}
+
+                        $targetItem = Get-Item -LiteralPath $targetPath
+                        $targetItem.LastWriteTime = $file.LastWriteTime
+                        $targetItem.Attributes = $file.Attributes
+                    }}
+
+                    Show-ProgressLine -Percent 100 -CurrentItem "复制完成"
+                    Write-Host ""
+                }}
+
+                Start-Process -FilePath $TargetExe -ArgumentList "--update-finish=$Version"
+                Start-Sleep -Seconds 2
+                Remove-Item -LiteralPath $PackageDir -Recurse -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $ArchivePath -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
+                exit 0
+            }} catch {{
+                Write-Host ""
+                Write-Host ("更新失败：" + $_.Exception.Message)
+                Read-Host "按回车关闭"
+                exit 1
+            }}
             """
         )
-        script_path.write_text(script, encoding="utf-8", newline="\r\n")
+        script_path.write_text(script, encoding="utf-8-sig", newline="\r\n")
         self.stage_changed.emit("收尾", 80, "升级脚本准备完成")
         return script_path
 
@@ -258,10 +353,10 @@ class UpdateDialog(QDialog):
         self.cancel_btn.clicked.disconnect()
         self.cancel_btn.clicked.connect(self.accept)
 
-    def _on_ready(self, batch_path: str, version: str):
+    def _on_ready(self, script_path: str, version: str):
         self.status_label.setText(f"更新已准备完成，正在退出并应用 {version}...")
         self.cancel_btn.setEnabled(False)
-        self.update_apply_requested.emit(batch_path)
+        self.update_apply_requested.emit(script_path)
 
     def _on_cancelled(self):
         self.status_label.setText("已取消升级")

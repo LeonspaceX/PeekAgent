@@ -260,10 +260,17 @@ class PeekAgentApp:
         finally:
             self.app.quit()
 
-    def _launch_update_and_quit(self, batch_path: str):
+    def _launch_update_and_quit(self, script_path: str):
         try:
             subprocess.Popen(
-                ["cmd", "/c", batch_path],
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    script_path,
+                ],
                 creationflags=0,
                 close_fds=False,
             )

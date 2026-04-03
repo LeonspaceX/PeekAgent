@@ -47,7 +47,7 @@ class MainWindow(QWidget):
         self._tool_queue: list[ToolCall] = []
         self._pending_tool_call: ToolCall | None = None
         self._pending_tool_id: str | None = None
-        self._agent_round = 0
+        self._consecutive_auto_tool_rounds = 0
         self._tool_flow_stopped = False
         self._drag_pos = None
         self._resize_edge = None
@@ -285,7 +285,7 @@ class MainWindow(QWidget):
         self._tool_queue.clear()
         self._pending_tool_call = None
         self._pending_tool_id = None
-        self._agent_round = 0
+        self._consecutive_auto_tool_rounds = 0
         self._tool_flow_stopped = False
 
     def _on_send(self, text: str, attachments: list = None):
@@ -425,20 +425,22 @@ class MainWindow(QWidget):
         self._current_session["messages"].append(assistant_message)
         self.chat_mgr.save_session(self._current_session)
         if tool_calls:
-            self._agent_round += 1
-            auto_tool_round_limit = self._auto_tool_round_limit()
-            if self._agent_round > auto_tool_round_limit:
-                self._append_tool_message(
-                    tool_id=uuid.uuid4().hex[:12],
-                    tool_name="command",
-                    title="工具调用",
-                    summary="工具调用已停止",
-                    detail=f"为了避免无限循环，本轮工具自动调用已在第 {auto_tool_round_limit} 轮后终止。",
-                    status="error",
-                    content="工具调用已被中止，因为连续调用次数过多，疑似进入循环。",
-                )
-                self.input_area.set_streaming(False)
-                return
+            if self._tool_round_has_manual_gate(tool_calls):
+                self._consecutive_auto_tool_rounds = 0
+            else:
+                self._consecutive_auto_tool_rounds += 1
+                auto_tool_round_limit = self._auto_tool_round_limit()
+                if self._consecutive_auto_tool_rounds > auto_tool_round_limit:
+                    self._append_tool_message(
+                        tool_id=uuid.uuid4().hex[:12],
+                        tool_name="command",
+                        title="工具调用",
+                        detail=f"为了避免无限循环，本轮工具自动调用已在第 {auto_tool_round_limit} 轮后终止。",
+                        status="error",
+                        content="工具调用已被中止，因为连续调用次数过多，疑似进入循环。",
+                    )
+                    self.input_area.set_streaming(False)
+                    return
             self._start_tool_sequence(tool_calls)
             return
 
@@ -452,6 +454,9 @@ class MainWindow(QWidget):
         except (TypeError, ValueError):
             return 8
         return max(1, parsed)
+
+    def _tool_round_has_manual_gate(self, tool_calls: list[ToolCall]) -> bool:
+        return any(self.tool_runtime.get_mode(call.tool_name) == "manual" for call in tool_calls)
 
     def _start_tool_sequence(self, tool_calls: list[ToolCall]):
         self._tool_queue = list(tool_calls)
@@ -478,10 +483,9 @@ class MainWindow(QWidget):
                 tool_id=uuid.uuid4().hex[:12],
                 tool_name=call.tool_name,
                 title=call.display_name,
-                summary=f"{call.display_name} 已被设置关闭",
                 detail=self._tool_request_detail(call),
                 status="error",
-                content=f"{call.display_name} 未执行，因为用户在设置中关闭了这个工具。",
+                content="[调用失败！]工具在设置中被关闭",
             )
             self._process_next_tool_call()
             return
@@ -603,14 +607,12 @@ class MainWindow(QWidget):
         attachments: list[str] | None = None,
         requires_approval: bool = False,
         expanded: bool = False,
-        summary: str = "",
     ) -> dict:
         message = {
             "role": "tool",
             "tool_id": tool_id,
             "tool_name": tool_name,
             "title": title,
-            "summary": summary,
             "detail": detail,
             "status": status,
             "content": content,
@@ -648,6 +650,16 @@ class MainWindow(QWidget):
             return f"{call.payload.get('path', '')}\n搜索内容: {call.payload.get('pattern', '')}"
         if call.tool_name in {"write", "add"}:
             return str(call.payload.get("path", ""))
+        if call.tool_name == "replace":
+            old = call.payload.get("old", "")
+            new = call.payload.get("new", "")
+            old_preview = old if len(old) <= 160 else old[:160] + "..."
+            new_preview = new if len(new) <= 160 else new[:160] + "..."
+            return (
+                f"{call.payload.get('path', '')}\n"
+                f"旧文本:\n{old_preview}\n\n"
+                f"新文本:\n{new_preview}"
+            )
         if call.tool_name == "command":
             return str(call.payload.get("content", ""))
         if call.tool_name == "client_list":
@@ -690,7 +702,7 @@ class MainWindow(QWidget):
             return str(call.payload.get("text", ""))
         if call.tool_name == "capture":
             return "截取当前整个屏幕。"
-        return str(call.raw_body)
+        return f"{call.display_name}\n该工具尚未定义详情格式。"
 
     def _maybe_generate_title(self):
         if not self._current_session or self._current_session.get("title") != "新对话":
@@ -776,7 +788,6 @@ class MainWindow(QWidget):
             if message is not None:
                 self._update_tool_message(
                     message,
-                    summary="工具调用已停止",
                     status="denied",
                     content="[调用失败] 工具调用已取消，因为用户手动停止了当前流程。",
                     requires_approval=False,

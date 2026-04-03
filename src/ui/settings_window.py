@@ -907,7 +907,7 @@ class SettingsWindow(QWidget):
             current_pid=os.getpid(),
             parent=self,
         )
-        self._update_dialog.update_apply_requested.connect(lambda batch_path: self.update_apply_requested.emit(batch_path))
+        self._update_dialog.update_apply_requested.connect(lambda script_path: self.update_apply_requested.emit(script_path))
         self._update_dialog.show()
 
     def _build_about_page(self) -> QWidget:

@@ -110,7 +110,6 @@ class ToolCall:
 class ToolResult:
     tool_name: str
     status: str
-    summary: str
     detail: str
     content: str
     attachments: list[str] = field(default_factory=list)
@@ -608,7 +607,7 @@ class ToolRuntime:
     def execute(self, call: ToolCall, session_id: str | None = None) -> ToolResult:
         if call.parse_error:
             message = self._error_content(f"{call.display_name}调用格式无效：{call.parse_error}")
-            return ToolResult(call.tool_name, "error", message, message, message)
+            return ToolResult(call.tool_name, "error", message, message)
 
         try:
             if call.tool_name == "read":
@@ -641,10 +640,10 @@ class ToolRuntime:
                 return self._client_disconnect(call.payload)
         except Exception as exc:
             message = self._error_content(f"{call.display_name}失败：{exc}")
-            return ToolResult(call.tool_name, "error", message, message, message)
+            return ToolResult(call.tool_name, "error", message, message)
 
         message = self._error_content(f"不支持的工具 `{call.tool_name}`。")
-        return ToolResult(call.tool_name, "error", message, message, message)
+        return ToolResult(call.tool_name, "error", message, message)
 
     def _read(self, payload: dict[str, Any]) -> ToolResult:
         path = self._resolve_path(payload["path"])
@@ -654,16 +653,14 @@ class ToolRuntime:
         if path.is_dir():
             names = sorted(item.name for item in path.iterdir())
             preview = "\n".join(names[:200])
-            summary = f"已读取目录 `{path}`。"
             detail = preview or "目录为空。"
             content = self._success_content(f"已读取目录：{path}\n{detail}")
-            return ToolResult("read", "success", summary, detail, content)
+            return ToolResult("read", "success", detail, content)
 
         if path.suffix.lower() in _IMAGE_EXTS:
-            summary = f"已读取文件 `{path.name}`。"
             detail = str(path)
             content = self._success_content(f"已读取图片：{path}")
-            return ToolResult("read", "success", summary, detail, content, attachments=[str(path)])
+            return ToolResult("read", "success", detail, content, attachments=[str(path)])
 
         mime = mimetypes.guess_type(path.name)[0] or ""
         if mime.startswith("text/") or path.suffix.lower() in _TEXT_EXTS:
@@ -685,23 +682,20 @@ class ToolRuntime:
                     text = "\n".join(f"{start_index + i + 1}: {line}" for i, line in enumerate(selected))
                 else:
                     text = ""
-                summary = f"已读取文件 `{path.name}` 的局部内容。"
-                detail = f"{path}\n? {start_line} - {end_line}"
+                detail = f"{path}\n第 {start_line} 行 - 第 {end_line} 行"
             else:
                 text = full_text
-                summary = f"已读取文件 `{path.name}`。"
                 detail = str(path)
 
             if len(text) > _MAX_TEXT_RESULT:
                 text = text[:_MAX_TEXT_RESULT] + "\n...[内容已截断]"
             content = self._success_content(f"已读取文件：{path}\n\n{text}")
-            return ToolResult("read", "success", summary, detail, content)
+            return ToolResult("read", "success", detail, content)
 
         size = path.stat().st_size
-        summary = f"已定位到二进制文件 `{path.name}`。"
         detail = f"{path}\n大小：{size} 字节"
         content = self._error_content(f"`{path}` 是二进制文件，当前 `read` 只适合文本和图片。")
-        return ToolResult("read", "error", summary, detail, content)
+        return ToolResult("read", "error", detail, content)
 
     def _search(self, payload: dict[str, Any]) -> ToolResult:
         base_path = self._resolve_path(payload["path"])
@@ -761,29 +755,26 @@ class ToolRuntime:
             body = body[:_MAX_TEXT_RESULT] + "\n...[内容已截断]"
         if truncated:
             body += f"\n\n...[已提前停止扫描，最多检查 {_SEARCH_MAX_FILES} 个文件]"
-        summary = f"已搜索 `{payload['pattern']}`。"
         detail = str(base_path)
         content = self._success_content(f"已搜索路径：{base_path}\n\n{body}")
-        return ToolResult("search", "success", summary, detail, content)
+        return ToolResult("search", "success", detail, content)
 
     def _write(self, payload: dict[str, str]) -> ToolResult:
         path = self._resolve_path(payload["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload["content"], encoding="utf-8")
-        summary = f"已写入 `{path.name}`。"
         detail = str(path)
         content = self._success_content(f"已写入文件：{path}")
-        return ToolResult("write", "success", summary, detail, content)
+        return ToolResult("write", "success", detail, content)
 
     def _add(self, payload: dict[str, str]) -> ToolResult:
         path = self._resolve_path(payload["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(payload["content"])
-        summary = f"已追加 `{path.name}`。"
         detail = str(path)
         content = self._success_content(f"已在文件末尾追加内容：{path}")
-        return ToolResult("add", "success", summary, detail, content)
+        return ToolResult("add", "success", detail, content)
 
     def _replace(self, payload: dict[str, str]) -> ToolResult:
         path = self._resolve_path(payload["path"])
@@ -804,10 +795,9 @@ class ToolRuntime:
 
         new_text = original.replace(old, new, 1)
         path.write_text(new_text, encoding="utf-8")
-        summary = f"已精确替换 `{path.name}` 中的一处内容。"
         detail = str(path)
         content = self._success_content(f"已精确替换文件内容：{path}")
-        return ToolResult("replace", "success", summary, detail, content)
+        return ToolResult("replace", "success", detail, content)
 
     def _command(self, payload: dict[str, Any]) -> ToolResult:
         output_limit = self.get_command_output_limit()
@@ -818,11 +808,10 @@ class ToolRuntime:
                 context_id,
                 payload.get("timeout_seconds"),
             )
-            summary = f"命令已在 PowerShell 上下文 `{context_id}` 中执行。"
             detail = payload["content"]
             if timed_out:
                 content = self._error_content(output)
-                return ToolResult("command", "error", "命令执行超时", detail, content, meta={"context": context_id})
+                return ToolResult("command", "error", detail, content, meta={"context": context_id})
             output = self._truncate_command_output(output, output_limit)
             if output:
                 info = (
@@ -835,24 +824,23 @@ class ToolRuntime:
                     f"{' 已新建该上下文。' if created else ''}\n未产生可见输出。"
                 )
             content = self._success_content(info)
-            return ToolResult("command", "success", summary, detail, content, meta={"context": context_id})
+            return ToolResult("command", "success", detail, content, meta={"context": context_id})
 
         output, timed_out = self.command_contexts.run_once(
             payload["content"],
             payload.get("timeout_seconds"),
         )
-        summary = "命令已在一次性 PowerShell 中执行。"
         detail = payload["content"]
         if timed_out:
             content = self._error_content(output)
-            return ToolResult("command", "error", "命令执行超时", detail, content)
+            return ToolResult("command", "error", detail, content)
         output = self._truncate_command_output(output, output_limit)
         if output:
             info = f"本次未保留终端上下文。\n\n返回信息：\n{output}"
         else:
             info = "本次未保留终端上下文。\n未产生可见输出。"
         content = self._success_content(info)
-        return ToolResult("command", "success", summary, detail, content)
+        return ToolResult("command", "success", detail, content)
 
     def _capture(self, session_id: str | None) -> ToolResult:
         attach_dir = ATTACHMENTS_DIR / session_id if session_id else ATTACHMENTS_DIR / "tool-temp"
@@ -860,10 +848,9 @@ class ToolRuntime:
         capture_path = attach_dir / f"capture_{uuid.uuid4().hex[:12]}.png"
         with mss.mss() as sct:
             sct.shot(output=str(capture_path))
-        summary = "已截取当前屏幕。"
-        detail = str(capture_path)
+        detail = "截图成功！"
         content = self._success_content(f"截图已保存：{capture_path}")
-        return ToolResult("capture", "success", summary, detail, content, attachments=[str(capture_path)])
+        return ToolResult("capture", "success", detail, content, attachments=[str(capture_path)])
 
     def _web_fetch(self, payload: dict[str, str]) -> ToolResult:
         url = payload["url"]
@@ -896,11 +883,9 @@ class ToolRuntime:
         if len(markdown) > _MAX_TEXT_RESULT:
             markdown = markdown[:_MAX_TEXT_RESULT] + "\n...[内容已截断]"
 
-        host = urlparse(final_url).netloc or final_url
-        summary = f"已抓取网页 `{host}`。"
         detail = final_url if final_url == url else f"请求地址: {url}\n最终地址: {final_url}"
         content = self._success_content(f"已抓取网页：{final_url}\n\n{markdown}")
-        return ToolResult("web-fetch", "success", summary, detail, content)
+        return ToolResult("web-fetch", "success", detail, content)
 
     def _web_search(self, payload: dict[str, Any]) -> ToolResult:
         api_key = self._get_tavily_api_key()
@@ -951,7 +936,6 @@ class ToolRuntime:
         if len(body_text) > _MAX_TEXT_RESULT:
             body_text = body_text[:_MAX_TEXT_RESULT] + "\n...[内容已截断]"
 
-        summary = f"已搜索网页：`{payload['query']}`。"
         topic = payload.get("topic", "general")
         topic_label = "新闻" if topic == "news" else "通用"
         depth = payload.get("search_depth", _WEB_SEARCH_DEPTH_DEFAULT)
@@ -969,7 +953,7 @@ class ToolRuntime:
         detail_lines.append(f"搜索深度: {depth_label}")
         detail = "\n".join(detail_lines)
         content = self._success_content(f"已完成网页搜索：{payload['query']}\n\n{body_text}")
-        return ToolResult("web-search", "success", summary, detail, content)
+        return ToolResult("web-search", "success", detail, content)
 
     def _clipboard(self, payload: dict[str, Any]) -> ToolResult:
         clipboard = QGuiApplication.clipboard()
@@ -985,49 +969,44 @@ class ToolRuntime:
             mime = QMimeData()
             mime.setUrls([QUrl.fromLocalFile(str(item)) for item in paths])
             clipboard.setMimeData(mime)
-            summary = f"已写入 {len(paths)} 个文件到剪贴板。"
             detail = "\n".join(str(item) for item in paths)
             content = self._success_content("已将文件列表写入系统剪贴板。")
-            return ToolResult("clipboard", "success", summary, detail, content)
+            return ToolResult("clipboard", "success", detail, content)
 
         text_value = payload.get("text", "")
         clipboard.setText(text_value)
-        summary = "已写入文本到剪贴板。"
         detail = text_value if len(text_value) <= 500 else text_value[:500] + "..."
         content = self._success_content("已将文本写入系统剪贴板。")
-        return ToolResult("clipboard", "success", summary, detail, content)
+        return ToolResult("clipboard", "success", detail, content)
 
     def _client_list(self) -> ToolResult:
         clients = ssh_client_list()
         if not clients:
-            summary = "未配置 SSH 客户端。"
-            detail = str(BASE_DIR / "data" / "ssh_clients.json")
+            detail = "读取已配置 SSH 客户端及连接状态"
             content = self._success_content("当前没有已配置的 SSH 客户端。")
-            return ToolResult("client_list", "success", summary, detail, content)
+            return ToolResult("client_list", "success", detail, content)
 
         lines = [f"- {item['name']} | {'已连接' if item.get('connected') else '未连接'}" for item in clients]
         body = "\n".join(lines)
-        summary = f"已读取 {len(clients)} 个 SSH 客户端。"
-        detail = str(BASE_DIR / "data" / "ssh_clients.json")
+        detail = "读取已配置 SSH 客户端及连接状态"
         content = self._success_content(f"SSH 客户端列表：\n{body}")
-        return ToolResult("client_list", "success", summary, detail, content)
+        return ToolResult("client_list", "success", detail, content)
 
     def _client_connect(self, payload: dict[str, Any]) -> ToolResult:
         _, created = ssh_client_connect(payload["name"])
-        summary = f"SSH 客户端 `{payload['name']}` 已连接。"
-        detail = payload["name"]
+        detail = f"连接至{payload['name']}"
         content = self._success_content(
             f"{'已建立' if created else '已复用'} SSH 会话：{payload['name']}"
         )
-        return ToolResult("client_connect", "success", summary, detail, content)
+        return ToolResult("client_connect", "success", detail, content)
 
     def _client_command(self, payload: dict[str, Any]) -> ToolResult:
         result = ssh_client_command(payload["name"], payload["command"], payload.get("timeout", 30))
-        detail = f"{payload['name']}\n{payload['command']}"
+        detail = f"执行节点：{payload['name']}\n执行命令：{payload['command']}"
         if not result.get("ok"):
             message = result.get("error", "远程命令执行失败。")
             content = self._error_content(message)
-            return ToolResult("client_command", "error", message, detail, content)
+            return ToolResult("client_command", "error", detail, content)
 
         stdout = result.get("stdout", "")
         stderr = result.get("stderr", "")
@@ -1039,20 +1018,17 @@ class ToolRuntime:
             output_parts.append(f"stderr:\n{self._truncate_command_output(stderr, self.get_command_output_limit())}")
         if not stdout and not stderr:
             output_parts.append("命令执行完成，无可见输出。")
-        summary = f"SSH 命令已在 `{payload['name']}` 上执行。"
         content = self._success_content("\n\n".join(output_parts))
-        return ToolResult("client_command", "success", summary, detail, content)
+        return ToolResult("client_command", "success", detail, content)
 
     def _client_disconnect(self, payload: dict[str, Any]) -> ToolResult:
         disconnected = ssh_client_disconnect(payload["name"])
         detail = payload["name"]
         if disconnected:
-            summary = f"SSH 客户端 `{payload['name']}` 已断开。"
             content = self._success_content(f"已断开 SSH 会话：{payload['name']}")
         else:
-            summary = f"SSH 客户端 `{payload['name']}` 当前未连接。"
             content = self._success_content(f"SSH 会话 `{payload['name']}` 当前未连接。")
-        return ToolResult("client_disconnect", "success", summary, detail, content)
+        return ToolResult("client_disconnect", "success", detail, content)
 
     @staticmethod
     def _success_content(message: str) -> str:
