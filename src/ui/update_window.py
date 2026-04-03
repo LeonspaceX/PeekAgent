@@ -184,12 +184,19 @@ class UpdateWorker(QThread):
 
                 $sourceRoot = [System.IO.Path]::GetFullPath($PackageDir)
                 $destinationRoot = [System.IO.Path]::GetFullPath($AppDir)
+                $sourceInternal = Join-Path $sourceRoot "_internal"
+                $destinationInternal = Join-Path $destinationRoot "_internal"
 
                 if (-not (Test-Path -LiteralPath $sourceRoot)) {{
                     throw "更新源目录不存在：$sourceRoot"
                 }}
 
                 New-Item -ItemType Directory -Force -Path $destinationRoot | Out-Null
+
+                if (Test-Path -LiteralPath $sourceInternal) {{
+                    Write-Host "正在清理旧版 _internal 目录..."
+                    Remove-Item -LiteralPath $destinationInternal -Recurse -Force -ErrorAction SilentlyContinue
+                }}
 
                 foreach ($dir in Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force -Directory) {{
                     $relativeDir = $dir.FullName.Substring($sourceRoot.Length).TrimStart('\')
@@ -219,7 +226,7 @@ class UpdateWorker(QThread):
                             New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
                         }}
 
-                        if (Test-Path -LiteralPath $targetPath) {{
+                        if ($false -and (Test-Path -LiteralPath $targetPath)) {{
                             $existingItem = Get-Item -LiteralPath $targetPath
                             if (-not $existingItem.PSIsContainer -and $existingItem.Length -eq $file.Length) {{
                                 $copiedBytes += $file.Length
@@ -234,6 +241,7 @@ class UpdateWorker(QThread):
                             $targetItem = Get-Item -LiteralPath $targetPath
                             $targetItem.LastWriteTime = $file.LastWriteTime
                             $targetItem.Attributes = $file.Attributes
+                            $copiedBytes += $file.Length
                             $percent = if ($totalBytes -gt 0) {{ [Math]::Min(100, [int]($copiedBytes * 100 / $totalBytes)) }} else {{ 100 }}
                             Show-ProgressLine -Percent $percent -CurrentItem $relativePath
                             continue
