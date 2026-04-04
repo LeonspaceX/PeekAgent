@@ -134,6 +134,17 @@ def _write_version_file() -> str:
     return version
 
 
+def _read_packaged_version(app_dir: Path) -> str:
+    candidates = [
+        app_dir / "version.txt",
+        app_dir / "_internal" / "version.txt",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+    raise RuntimeError("Built package is missing version.txt")
+
+
 def _zip_dist() -> Path:
     archive_base = DIST_DIR / ARCHIVE_NAME
     shutil.make_archive(str(archive_base), "zip", root_dir=DIST_DIR, base_dir=APP_NAME)
@@ -150,6 +161,11 @@ def main() -> int:
     print(f"Version: {version}")
     print("Building with PyInstaller...")
     PyInstaller.__main__.run(_build_args())
+    packaged_version = _read_packaged_version(APP_DIR)
+    if packaged_version != version:
+        raise RuntimeError(
+            f"Packaged version mismatch: expected {version}, got {packaged_version}"
+        )
     archive_path = _zip_dist()
     print(f"Build complete: {APP_DIR}")
     print(f"Release archive: {archive_path}")

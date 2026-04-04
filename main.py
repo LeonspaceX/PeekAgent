@@ -96,8 +96,6 @@ class _HotkeyBridge(QObject):
 
 
 class PeekAgentApp:
-    TEMPORARY_TOPMOST_DURATION_MS = 200
-
     def __init__(
         self,
         argv: list[str],
@@ -121,7 +119,6 @@ class PeekAgentApp:
         self._shutting_down = False
         self._update_finish_version = update_finish_version
         self._no_open_window = no_open_window
-        self._temporary_topmost_restore_timers = {}
         self.hotkey_bridge = _HotkeyBridge()
         self.hotkey_bridge.activated.connect(self._toggle_window_from_hotkey)
 
@@ -184,39 +181,11 @@ class PeekAgentApp:
         self._hotkey_handle = new_handle
         self._registered_hotkey = normalized
 
-    def _show_and_activate_window(self, window, temporary_topmost: bool = False):
+    def _show_and_activate_window(self, window):
         if window.isMinimized():
             window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
 
         window.show()
-
-        if temporary_topmost and not bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
-            existing_timer = self._temporary_topmost_restore_timers.pop(window, None)
-            if existing_timer is not None:
-                existing_timer.stop()
-                existing_timer.deleteLater()
-
-            window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-            window.show()
-
-            restore_timer = QTimer(self.app)
-            restore_timer.setSingleShot(True)
-
-            def _restore_topmost():
-                try:
-                    if window.isVisible() and bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
-                        window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
-                        window.show()
-                except RuntimeError:
-                    pass
-                finally:
-                    timer = self._temporary_topmost_restore_timers.pop(window, None)
-                    if timer is not None:
-                        timer.deleteLater()
-
-            restore_timer.timeout.connect(_restore_topmost)
-            self._temporary_topmost_restore_timers[window] = restore_timer
-            restore_timer.start(self.TEMPORARY_TOPMOST_DURATION_MS)
 
         window.raise_()
         window.activateWindow()
@@ -255,7 +224,7 @@ class PeekAgentApp:
                 self.main_window.reset_geometry_to_default
             )
             self.settings_window.apply_theme(isDarkTheme())
-        self._show_and_activate_window(self.settings_window, temporary_topmost=True)
+        self._show_and_activate_window(self.settings_window)
 
     def _apply_theme(self):
         theme_mode = (self.settings.get("appearance", "theme_mode", "light") or "light").strip().lower()
