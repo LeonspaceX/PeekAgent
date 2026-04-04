@@ -1,11 +1,11 @@
 """PeekAgent - Lightweight floating AI assistant."""
 
 import json
-import sys
 import os
 import shutil
-import threading
 import subprocess
+import sys
+import threading
 
 
 def _append_chromium_flag(flag: str):
@@ -21,7 +21,7 @@ _append_chromium_flag("--disable-direct-composition")
 _append_chromium_flag("--disable-features=DirectComposition")
 
 # Ensure data directories exist and seed default prompt files
-from src.config import BASE_DIR, ICON_PATH, SETTINGS_PATH, build_initial_settings, build_default_highlight_theme_bundle
+from src.config import BASE_DIR, ICON_PATH, SETTINGS_PATH, build_default_highlight_theme_bundle, build_initial_settings
 
 for d in ["data/context", "data/prompt"]:
     (BASE_DIR / d).mkdir(parents=True, exist_ok=True)
@@ -56,10 +56,10 @@ if not SETTINGS_PATH.exists():
         encoding="utf-8",
     )
 
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtCore import QObject, Qt, Signal, QLocale, QTimer
 import keyboard
+from PySide6.QtCore import QObject, QLocale, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QIcon
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from qfluentwidgets import FluentTranslator, Theme, isDarkTheme, setTheme, setThemeColor
 
 from src.config import Settings
@@ -80,12 +80,30 @@ def _extract_update_finish_arg(argv: list[str]) -> tuple[str | None, list[str]]:
     return update_finish_version, filtered
 
 
+def _extract_no_open_window_arg(argv: list[str]) -> tuple[bool, list[str]]:
+    no_open_window = False
+    filtered = [argv[0]]
+    for item in argv[1:]:
+        if item == "--no-open-window":
+            no_open_window = True
+            continue
+        filtered.append(item)
+    return no_open_window, filtered
+
+
 class _HotkeyBridge(QObject):
     activated = Signal()
 
 
 class PeekAgentApp:
-    def __init__(self, argv: list[str], update_finish_version: str | None = None):
+    TEMPORARY_TOPMOST_DURATION_MS = 200
+
+    def __init__(
+        self,
+        argv: list[str],
+        update_finish_version: str | None = None,
+        no_open_window: bool = False,
+    ):
         self.app = QApplication(argv)
         self.app.setQuitOnLastWindowClosed(False)
         self._fluent_translator = FluentTranslator(QLocale("zh_CN"), self.app)
@@ -102,6 +120,8 @@ class PeekAgentApp:
         self._shutdown_lock = threading.Lock()
         self._shutting_down = False
         self._update_finish_version = update_finish_version
+        self._no_open_window = no_open_window
+        self._temporary_topmost_restore_timers = {}
         self.hotkey_bridge = _HotkeyBridge()
         self.hotkey_bridge.activated.connect(self._toggle_window_from_hotkey)
 
@@ -109,7 +129,8 @@ class PeekAgentApp:
         self._setup_hotkey()
         self._apply_theme()
 
-        self.main_window.show()
+        if not self._no_open_window:
+            self._show_and_activate_window(self.main_window)
         if self._update_finish_version:
             QTimer.singleShot(300, self._show_update_complete_dialog)
 
@@ -163,13 +184,48 @@ class PeekAgentApp:
         self._hotkey_handle = new_handle
         self._registered_hotkey = normalized
 
+    def _show_and_activate_window(self, window, temporary_topmost: bool = False):
+        if window.isMinimized():
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+
+        window.show()
+
+        if temporary_topmost and not bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+            existing_timer = self._temporary_topmost_restore_timers.pop(window, None)
+            if existing_timer is not None:
+                existing_timer.stop()
+                existing_timer.deleteLater()
+
+            window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+            window.show()
+
+            restore_timer = QTimer(self.app)
+            restore_timer.setSingleShot(True)
+
+            def _restore_topmost():
+                try:
+                    if window.isVisible() and bool(window.windowFlags() & Qt.WindowType.WindowStaysOnTopHint):
+                        window.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, False)
+                        window.show()
+                except RuntimeError:
+                    pass
+                finally:
+                    timer = self._temporary_topmost_restore_timers.pop(window, None)
+                    if timer is not None:
+                        timer.deleteLater()
+
+            restore_timer.timeout.connect(_restore_topmost)
+            self._temporary_topmost_restore_timers[window] = restore_timer
+            restore_timer.start(self.TEMPORARY_TOPMOST_DURATION_MS)
+
+        window.raise_()
+        window.activateWindow()
+
     def _toggle_window(self):
         if self.main_window.isVisible():
             self.main_window.hide()
         else:
-            self.main_window.show()
-            self.main_window.activateWindow()
-            self.main_window.raise_()
+            self._show_and_activate_window(self.main_window)
 
     def _toggle_window_from_hotkey(self):
         if self._shutting_down:
@@ -177,9 +233,7 @@ class PeekAgentApp:
         if self.main_window.isVisible():
             self.main_window.hide()
             return
-        self.main_window.show()
-        self.main_window.activateWindow()
-        self.main_window.raise_()
+        self._show_and_activate_window(self.main_window)
         QTimer.singleShot(0, self.main_window.focus_input)
 
     def _on_tray_activated(self, reason):
@@ -201,8 +255,7 @@ class PeekAgentApp:
                 self.main_window.reset_geometry_to_default
             )
             self.settings_window.apply_theme(isDarkTheme())
-        self.settings_window.show()
-        self.settings_window.activateWindow()
+        self._show_and_activate_window(self.settings_window, temporary_topmost=True)
 
     def _apply_theme(self):
         theme_mode = (self.settings.get("appearance", "theme_mode", "light") or "light").strip().lower()
@@ -298,10 +351,15 @@ class PeekAgentApp:
 
 if __name__ == "__main__":
     update_finish_version, qt_argv = _extract_update_finish_arg(sys.argv)
+    no_open_window, qt_argv = _extract_no_open_window_arg(qt_argv)
     helper_exit_code = maybe_handle_startup_helper(qt_argv[1:])
     if helper_exit_code is not None:
         sys.exit(helper_exit_code)
-    app = PeekAgentApp(qt_argv, update_finish_version=update_finish_version)
+    app = PeekAgentApp(
+        qt_argv,
+        update_finish_version=update_finish_version,
+        no_open_window=no_open_window,
+    )
     exit_code = 0
     try:
         exit_code = app.run()

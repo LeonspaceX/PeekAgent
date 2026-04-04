@@ -23,13 +23,13 @@ def is_windows() -> bool:
 
 def build_startup_command() -> str:
     if getattr(sys, "frozen", False):
-        return subprocess.list2cmdline([sys.executable])
+        return subprocess.list2cmdline([sys.executable, "--no-open-window"])
 
     python_path = Path(sys.executable).resolve()
     pythonw_path = python_path.with_name("pythonw.exe")
     launcher = pythonw_path if pythonw_path.exists() else python_path
     main_path = (BASE_DIR / "main.py").resolve()
-    return subprocess.list2cmdline([str(launcher), str(main_path)])
+    return subprocess.list2cmdline([str(launcher), str(main_path), "--no-open-window"])
 
 
 def configure_auto_start(enabled: bool):
@@ -132,7 +132,7 @@ def request_auto_start_update(enabled: bool):
             raise RuntimeError(message or "开机自启系统配置失败。")
     finally:
         try:
-            if 'execute_info' in locals() and execute_info.hProcess:
+            if "execute_info" in locals() and execute_info.hProcess:
                 kernel32.CloseHandle(execute_info.hProcess)
         except Exception:
             pass
