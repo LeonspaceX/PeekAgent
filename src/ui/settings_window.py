@@ -11,14 +11,14 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIntValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget,
-    QFormLayout, QFrame, QButtonGroup, QFileDialog, QScrollArea,
+    QFormLayout, QFrame, QButtonGroup, QFileDialog,
     QDialog, QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from qfluentwidgets import (
     LineEdit, ComboBox, PushButton, ToolButton, FluentIcon,
     SwitchButton, SubtitleLabel, StrongBodyLabel, BodyLabel, InfoBar, InfoBarPosition,
     ListWidget, ColorPickerButton, PrimaryPushButton, RadioButton, ProgressBar, MessageBox, isDarkTheme,
-    setCustomStyleSheet, FluentThemeColor,
+    setCustomStyleSheet, FluentThemeColor, SmoothScrollArea,
 )
 from src.config import (
     BASE_DIR,
@@ -295,9 +295,9 @@ class SettingsWindow(QWidget):
         if index == 7:
             self._maybe_check_update()
 
-    def _wrap_scroll(self, page: QWidget) -> QScrollArea:
+    def _wrap_scroll(self, page: QWidget) -> SmoothScrollArea:
         page.setObjectName("settingsPage")
-        scroll = QScrollArea(self)
+        scroll = SmoothScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -380,6 +380,22 @@ class SettingsWindow(QWidget):
 
         self.external_prompt_editor_switch = SwitchButton(self)
         form.addRow("外部prompt编辑:", self.external_prompt_editor_switch)
+
+        notification_row = QHBoxLayout()
+        notification_row.setSpacing(8)
+        self.task_complete_notification_switch = SwitchButton(self)
+        notification_row.addWidget(self.task_complete_notification_switch)
+        notification_row.addStretch(1)
+        form.addRow("任务结束通知:", notification_row)
+
+        self.task_complete_notification_threshold_edit = LineEdit(self)
+        self.task_complete_notification_threshold_edit.setPlaceholderText("30")
+        self.task_complete_notification_threshold_edit.setValidator(QIntValidator(1, 86400, self))
+        form.addRow("通知阈值(秒):", self.task_complete_notification_threshold_edit)
+        self.task_complete_notification_switch.checkedChanged.connect(
+            self._update_task_notification_threshold_enabled
+        )
+
         self.github_mirror_edit = LineEdit(self)
         self.github_mirror_edit.setPlaceholderText("留空则直连 GitHub")
         form.addRow("GitHub 镜像前缀:", self.github_mirror_edit)
@@ -554,11 +570,17 @@ class SettingsWindow(QWidget):
         self.endpoint_type_group = QButtonGroup(self)
         self.openai_radio = RadioButton("OpenAI", self)
         self.anthropic_radio = RadioButton("Anthropic", self)
+        self.gemini_radio = RadioButton("Gemini", self)
         self.endpoint_type_group.addButton(self.openai_radio)
         self.endpoint_type_group.addButton(self.anthropic_radio)
+        self.endpoint_type_group.addButton(self.gemini_radio)
         endpoint_row.addWidget(self.openai_radio)
         endpoint_row.addWidget(self.anthropic_radio)
+        endpoint_row.addWidget(self.gemini_radio)
         endpoint_row.addStretch()
+        self.openai_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
+        self.anthropic_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
+        self.gemini_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
         form.addRow("端点格式:", endpoint_row)
 
         # Model selection row
@@ -650,14 +672,17 @@ class SettingsWindow(QWidget):
         self.search_switch = SwitchButton(self)
         form.addRow("搜索文本:", self.search_switch)
 
-        self.capture_switch = SwitchButton(self)
-        form.addRow("截图:", self.capture_switch)
-
         self.web_search_switch = SwitchButton(self)
         form.addRow("联网搜索:", self.web_search_switch)
 
         self.clipboard_switch = SwitchButton(self)
         form.addRow("写入剪贴板:", self.clipboard_switch)
+
+        self.web_fetch_switch = SwitchButton(self)
+        form.addRow("抓取网页:", self.web_fetch_switch)
+
+        self.capture_mode_group, capture_row = self._create_mode_row()
+        form.addRow("截图:", capture_row)
 
         self.write_mode_group, write_row = self._create_mode_row()
         form.addRow("写入文件:", write_row)
@@ -673,9 +698,6 @@ class SettingsWindow(QWidget):
 
         self.ssh_remote_command_mode_group, ssh_remote_command_row = self._create_mode_row()
         form.addRow("远程执行命令:", ssh_remote_command_row)
-
-        self.web_fetch_mode_group, web_fetch_row = self._create_mode_row()
-        form.addRow("抓取网页:", web_fetch_row)
 
         self.command_output_limit_edit = LineEdit(self)
         self.command_output_limit_edit.setPlaceholderText("12000")
@@ -962,6 +984,13 @@ class SettingsWindow(QWidget):
             self.external_prompt_editor_switch.setChecked(
                 s.get("general", "external_prompt_editor_enabled", False)
             )
+            self.task_complete_notification_switch.setChecked(
+                s.get("general", "task_complete_notification_enabled", False)
+            )
+            self.task_complete_notification_threshold_edit.setText(
+                str(s.get("general", "task_complete_notification_threshold_seconds", 30))
+            )
+            self._update_task_notification_threshold_enabled()
             self.github_mirror_edit.setText(s.get("general", "github_mirror", "https://v6.gh-proxy.org/"))
 
             self._set_color_picker_value(
@@ -988,8 +1017,10 @@ class SettingsWindow(QWidget):
             self.endpoint_url_edit.setText(s.get("model", "endpoint_url", ""))
             self.api_key_edit.setText(s.get("model", "api_key", ""))
             endpoint_type = s.get("model", "endpoint_type", "openai")
-            self.openai_radio.setChecked(endpoint_type != "anthropic")
+            self.openai_radio.setChecked(endpoint_type not in {"anthropic", "gemini"})
             self.anthropic_radio.setChecked(endpoint_type == "anthropic")
+            self.gemini_radio.setChecked(endpoint_type == "gemini")
+            self._refresh_model_endpoint_placeholders()
             model = s.get("model", "model_name", "")
             if model:
                 self.model_combo.addItem(model)
@@ -999,7 +1030,7 @@ class SettingsWindow(QWidget):
             self.stream_switch.setChecked(s.get("model", "stream", True))
             self.read_switch.setChecked(s.get("tools", "read_enabled", True))
             self.search_switch.setChecked(s.get("tools", "search_enabled", True))
-            self.capture_switch.setChecked(s.get("tools", "capture_enabled", True))
+            self._set_mode_group(self.capture_mode_group, s.get("tools", "capture_mode", "manual"))
             self.web_search_switch.setChecked(s.get("tools", "web_search_enabled", True))
             self.clipboard_switch.setChecked(s.get("tools", "clipboard_enabled", True))
             self.tavily_api_key_edit.setText(s.get("integrations", "tavily_api_key", ""))
@@ -1008,7 +1039,7 @@ class SettingsWindow(QWidget):
             self._set_mode_group(self.replace_mode_group, s.get("tools", "replace_mode", "manual"))
             self._set_mode_group(self.command_mode_group, s.get("tools", "command_mode", "manual"))
             self._set_mode_group(self.ssh_remote_command_mode_group, s.get("tools", "ssh_remote_command_mode", "manual"))
-            self._set_mode_group(self.web_fetch_mode_group, s.get("tools", "web_fetch_mode", "manual"))
+            self.web_fetch_switch.setChecked(s.get("tools", "web_fetch_enabled", True))
             self.command_output_limit_edit.setText(str(s.get("tools", "command_output_limit", 12000)))
             self.auto_tool_round_limit_edit.setText(str(s.get("tools", "auto_tool_round_limit", 8)))
         finally:
@@ -1019,6 +1050,12 @@ class SettingsWindow(QWidget):
         s.set("general", "hotkey", self.hotkey_edit.text())
         s.set("general", "always_on_top", self.always_top_switch.isChecked())
         s.set("general", "external_prompt_editor_enabled", self.external_prompt_editor_switch.isChecked())
+        s.set("general", "task_complete_notification_enabled", self.task_complete_notification_switch.isChecked())
+        s.set(
+            "general",
+            "task_complete_notification_threshold_seconds",
+            self._task_complete_notification_threshold_value(),
+        )
         s.set("general", "github_mirror", self.github_mirror_edit.text().strip())
 
         s.set("appearance", "theme_mode", self._theme_mode_value())
@@ -1033,7 +1070,7 @@ class SettingsWindow(QWidget):
         s.set("model", "stream", self.stream_switch.isChecked())
         s.set("tools", "read_enabled", self.read_switch.isChecked())
         s.set("tools", "search_enabled", self.search_switch.isChecked())
-        s.set("tools", "capture_enabled", self.capture_switch.isChecked())
+        s.set("tools", "capture_mode", self._mode_group_value(self.capture_mode_group))
         s.set("tools", "web_search_enabled", self.web_search_switch.isChecked())
         s.set("tools", "clipboard_enabled", self.clipboard_switch.isChecked())
         s.set("integrations", "tavily_api_key", self.tavily_api_key_edit.text())
@@ -1042,7 +1079,7 @@ class SettingsWindow(QWidget):
         s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group))
         s.set("tools", "command_mode", self._mode_group_value(self.command_mode_group))
         s.set("tools", "ssh_remote_command_mode", self._mode_group_value(self.ssh_remote_command_mode_group))
-        s.set("tools", "web_fetch_mode", self._mode_group_value(self.web_fetch_mode_group))
+        s.set("tools", "web_fetch_enabled", self.web_fetch_switch.isChecked())
         s.set("tools", "command_output_limit", self._command_output_limit_value())
         s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value())
 
@@ -1127,6 +1164,11 @@ class SettingsWindow(QWidget):
         self.settings.set("appearance", "theme_mode", self._theme_mode_value())
         self.highlight_preview.apply_theme(isDarkTheme())
         self.settings_saved.emit()
+
+    def _update_task_notification_threshold_enabled(self):
+        self.task_complete_notification_threshold_edit.setEnabled(
+            self.task_complete_notification_switch.isChecked()
+        )
 
     def _refresh_tavily_usage(self):
         api_key = self.tavily_api_key_edit.text().strip()
@@ -1258,7 +1300,23 @@ class SettingsWindow(QWidget):
                       position=InfoBarPosition.TOP, duration=5000)
 
     def _current_endpoint_type(self) -> str:
-        return "anthropic" if self.anthropic_radio.isChecked() else "openai"
+        if self.anthropic_radio.isChecked():
+            return "anthropic"
+        if self.gemini_radio.isChecked():
+            return "gemini"
+        return "openai"
+
+    def _refresh_model_endpoint_placeholders(self):
+        endpoint_type = self._current_endpoint_type()
+        if endpoint_type == "anthropic":
+            self.endpoint_url_edit.setPlaceholderText("https://api.anthropic.com/v1")
+            self.api_key_edit.setPlaceholderText("sk-ant-...")
+        elif endpoint_type == "gemini":
+            self.endpoint_url_edit.setPlaceholderText("https://generativelanguage.googleapis.com/v1beta")
+            self.api_key_edit.setPlaceholderText("AIza...")
+        else:
+            self.endpoint_url_edit.setPlaceholderText("https://api.openai.com/v1")
+            self.api_key_edit.setPlaceholderText("sk-...")
 
     def _current_model_text(self) -> str:
         if self.model_edit.isVisible():
@@ -1314,6 +1372,16 @@ class SettingsWindow(QWidget):
             value = int(text)
         except ValueError:
             return 8
+        return max(1, value)
+
+    def _task_complete_notification_threshold_value(self) -> int:
+        text = self.task_complete_notification_threshold_edit.text().strip()
+        if not text:
+            return 30
+        try:
+            value = int(text)
+        except ValueError:
+            return 30
         return max(1, value)
 
     @staticmethod

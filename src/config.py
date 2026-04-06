@@ -50,6 +50,8 @@ DEFAULT_SETTINGS = {
         "auto_start": False,
         "always_on_top": True,
         "external_prompt_editor_enabled": False,
+        "task_complete_notification_enabled": False,
+        "task_complete_notification_threshold_seconds": 30,
         "github_mirror": "https://v6.gh-proxy.org/",
     },
     "appearance": {
@@ -67,8 +69,8 @@ DEFAULT_SETTINGS = {
         "replace_mode": "manual",
         "command_mode": "manual",
         "ssh_remote_command_mode": "manual",
-        "capture_enabled": True,
-        "web_fetch_mode": "manual",
+        "capture_mode": "manual",
+        "web_fetch_enabled": True,
         "web_search_enabled": True,
         "clipboard_enabled": True,
         "command_output_limit": 12000,
@@ -188,6 +190,22 @@ class Settings:
                     for key, val in defaults.items():
                         if key not in self._data[section]:
                             self._data[section][key] = val
+            self._migrate_legacy_settings()
+
+    def _migrate_legacy_settings(self):
+        tools = self._data.setdefault("tools", {})
+
+        if "capture_enabled" in tools:
+            legacy_capture_enabled = tools.pop("capture_enabled")
+            tools["capture_mode"] = "manual" if legacy_capture_enabled else "off"
+        elif "capture_mode" not in tools:
+            tools["capture_mode"] = DEFAULT_SETTINGS["tools"]["capture_mode"]
+
+        if "web_fetch_mode" in tools:
+            legacy_web_fetch_mode = tools.pop("web_fetch_mode")
+            tools["web_fetch_enabled"] = str(legacy_web_fetch_mode).strip().lower() != "off"
+        elif "web_fetch_enabled" not in tools:
+            tools["web_fetch_enabled"] = DEFAULT_SETTINGS["tools"]["web_fetch_enabled"]
 
     def save(self):
         with self._data_lock:

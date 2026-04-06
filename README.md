@@ -11,7 +11,7 @@
 - 支持多会话、会话重命名、删除和自动生成标题
 - 支持 Markdown、代码高亮、KaTeX 渲染
 - 支持附件输入、拖拽文件、图片输入
-- 支持 OpenAI 兼容端点和 Anthropic 兼容端点
+- 支持 OpenAI 兼容端点、Anthropic 兼容端点和 Gemini 端点
 - 支持自动拉取模型列表，配置简单
 - 内置基础 Agent 工具：读文件、搜索文本、写入/追加/替换文件、PowerShell 命令、截图、网页抓取、网页搜索、剪贴板
 - 支持使用 Tavily api 进行联网搜索
@@ -59,10 +59,11 @@ build_win.py           Windows onedir 打包脚本
 
 ## 模型与端点
 
-PeekAgent 当前支持两类端点：
+PeekAgent 当前支持三类端点：
 
 - OpenAI 兼容：`/v1/chat/completions`
 - Anthropic 兼容：`/v1/messages`
+- Gemini：`/v1beta/models/{model}:generateContent`，模型列表为 `/v1beta/models`
 
 在设置页中可以配置：
 

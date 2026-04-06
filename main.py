@@ -123,6 +123,7 @@ class PeekAgentApp:
         self.hotkey_bridge.activated.connect(self._toggle_window_from_hotkey)
 
         self._setup_tray()
+        self.main_window.set_notification_tray(self.tray)
         self._setup_hotkey()
         self._apply_theme()
 

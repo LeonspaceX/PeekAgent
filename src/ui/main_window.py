@@ -5,7 +5,8 @@ import base64
 import shutil
 import mimetypes
 import uuid
-from PySide6.QtCore import Qt, QPoint, QSize, QRect, QTimer, QEvent
+import time
+from PySide6.QtCore import Qt, QPoint, QSize, QRect, QTimer, QEvent, QObject, Signal
 from PySide6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QWidget, QSystemTrayIcon, QMenu,
     QApplication,
@@ -28,6 +29,10 @@ class _GripWidget(QWidget):
     """Invisible widget that still receives mouse events (no painting)."""
     def paintEvent(self, event):
         pass  # Draw nothing — truly invisible, but accepts mouse input
+
+
+class _BackgroundTaskBridge(QObject):
+    taskCompleted = Signal()
 
 
 class MainWindow(QWidget):
@@ -58,6 +63,11 @@ class MainWindow(QWidget):
         self._title_typing_index = 0
         self._title_typing_session_id = None
         self._shutdown_done = False
+        self._task_started_at: float | None = None
+        self._notification_tray: QSystemTrayIcon | None = None
+        self._background_task_bridge = _BackgroundTaskBridge(self)
+        self._background_task_bridge.taskCompleted.connect(self._on_background_task_completed)
+        self.tool_runtime.background_tasks.set_completion_callback(self._background_task_bridge.taskCompleted.emit)
 
         self._save_geo_timer = QTimer(self)
         self._save_geo_timer.setSingleShot(True)
@@ -183,6 +193,9 @@ class MainWindow(QWidget):
     def apply_theme(self, dark_mode: bool | None = None):
         self._apply_theme(dark_mode)
 
+    def set_notification_tray(self, tray: QSystemTrayIcon | None):
+        self._notification_tray = tray
+
     def set_always_on_top(self, enabled: bool):
         was_visible = self.isVisible()
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, bool(enabled))
@@ -288,6 +301,35 @@ class MainWindow(QWidget):
         self._consecutive_auto_tool_rounds = 0
         self._tool_flow_stopped = False
 
+    def _start_task_timer(self):
+        self._task_started_at = time.monotonic()
+
+    def _finish_task_timer(self, notify: bool):
+        started_at = self._task_started_at
+        self._task_started_at = None
+        if not notify or started_at is None:
+            return
+        if not self.settings.get("general", "task_complete_notification_enabled", False):
+            return
+        threshold = self.settings.get("general", "task_complete_notification_threshold_seconds", 30)
+        try:
+            threshold = int(threshold)
+        except (TypeError, ValueError):
+            threshold = 30
+        threshold = max(1, threshold)
+        elapsed = time.monotonic() - started_at
+        if elapsed < threshold:
+            return
+        tray = self._notification_tray
+        if tray is None:
+            return
+        tray.showMessage(
+            "任务完成！",
+            "请返回PeekAgent查看详情",
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
+
     def _on_send(self, text: str, attachments: list = None):
         if not self._current_session:
             self._new_session()
@@ -318,11 +360,13 @@ class MainWindow(QWidget):
         self.chat_mgr.save_session(self._current_session)
         self.chat_view.add_message("user", self._message_display_text(msg), message_index)
         self.input_area.set_streaming(True)
+        self._start_task_timer()
 
         # Start streaming
         try:
             self._request_assistant_reply()
         except Exception as e:
+            self._finish_task_timer(False)
             self._show_error(str(e))
             self.input_area.set_streaming(False)
 
@@ -407,6 +451,8 @@ class MainWindow(QWidget):
         }
 
     def _request_assistant_reply(self):
+        if self._flush_pending_background_results(trigger_follow_up=False):
+            self.chat_mgr.save_session(self._current_session)
         messages = self._build_api_messages()
         worker = self.api_client.send_stream(messages)
         self._stream_worker = worker
@@ -424,6 +470,7 @@ class MainWindow(QWidget):
         assistant_message = {"role": "assistant", "content": full_text, "display_content": display_text}
         self._current_session["messages"].append(assistant_message)
         self.chat_mgr.save_session(self._current_session)
+        completed_background_tasks = self._flush_pending_background_results(trigger_follow_up=False)
         if tool_calls:
             if self._tool_round_has_manual_gate(tool_calls):
                 self._consecutive_auto_tool_rounds = 0
@@ -439,12 +486,24 @@ class MainWindow(QWidget):
                         status="error",
                         content="工具调用已被中止，因为连续调用次数过多，疑似进入循环。",
                     )
+                    self._finish_task_timer(False)
                     self.input_area.set_streaming(False)
                     return
             self._start_tool_sequence(tool_calls)
             return
 
+        if completed_background_tasks:
+            try:
+                self._request_assistant_reply()
+                return
+            except Exception as e:
+                self._finish_task_timer(False)
+                self._show_error(str(e))
+                self.input_area.set_streaming(False)
+                return
+
         self.input_area.set_streaming(False)
+        self._finish_task_timer(True)
         self._maybe_generate_title()
 
     def _auto_tool_round_limit(self) -> int:
@@ -469,9 +528,11 @@ class MainWindow(QWidget):
             if self._tool_flow_stopped:
                 self._tool_flow_stopped = False
                 return
+            self._flush_pending_background_results(trigger_follow_up=False)
             try:
                 self._request_assistant_reply()
             except Exception as e:
+                self._finish_task_timer(False)
                 self._show_error(str(e))
                 self.input_area.set_streaming(False)
             return
@@ -625,6 +686,75 @@ class MainWindow(QWidget):
         self.chat_view.add_tool_message(self._tool_payload(message))
         return message
 
+    def _flush_pending_background_results(self, trigger_follow_up: bool = False) -> bool:
+        if not self._current_session:
+            return False
+        session_id = self._current_session.get("id")
+        results = self.tool_runtime.background_tasks.pop_completed_results(session_id)
+        if not results:
+            return False
+        for result in results:
+            self._append_background_result_message(result)
+        return True
+
+    def _can_deliver_background_results_immediately(self) -> bool:
+        return (
+            self._current_session is not None
+            and self._stream_worker is None
+            and self._tool_worker is None
+            and self._pending_tool_call is None
+            and not self._tool_queue
+        )
+
+    def _on_background_task_completed(self):
+        if not self._can_deliver_background_results_immediately():
+            return
+        if not self._flush_pending_background_results(trigger_follow_up=False):
+            return
+        try:
+            self.input_area.set_streaming(True)
+            self._start_task_timer()
+            self._request_assistant_reply()
+        except Exception as e:
+            self._finish_task_timer(False)
+            self.input_area.set_streaming(False)
+            self._show_error(str(e))
+
+    def _append_background_result_message(self, result) -> dict:
+        status = result.status
+        exit_code = -1 if result.exit_code is None else result.exit_code
+        context_line = f"PowerShell 上下文：{result.context_id}\n" if result.context_id else ""
+        detail = (
+            f"任务ID：{result.task_id}\n"
+            f"任务标题：{result.title}\n"
+            f"{context_line}"
+            f"退出码：{exit_code}\n"
+            f"耗时：{result.duration_seconds:.2f} 秒"
+        )
+        output = self.tool_runtime._truncate_command_output(
+            result.output,
+            self.tool_runtime.get_command_output_limit(),
+        )
+        content_prefix = self.tool_runtime._success_content if status == "success" else self.tool_runtime._error_content
+        content = content_prefix(
+            f"后台任务已完成\n"
+            f"任务ID：{result.task_id}\n"
+            f"任务标题：{result.title}\n"
+            f"{context_line}"
+            f"退出码：{exit_code}\n"
+            f"耗时：{result.duration_seconds:.2f} 秒\n\n"
+            f"输出：\n{output or '未产生可见输出。'}"
+        )
+        return self._append_tool_message(
+            tool_id=uuid.uuid4().hex[:12],
+            tool_name="background",
+            title=f"后台任务完成: {result.title}",
+            detail=detail,
+            status=status,
+            content=content,
+            expanded=False,
+        )
+
     def _update_tool_message(self, message: dict, **updates):
         message.update(updates)
         self.chat_mgr.save_session(self._current_session)
@@ -651,17 +781,26 @@ class MainWindow(QWidget):
         if call.tool_name in {"write", "add"}:
             return str(call.payload.get("path", ""))
         if call.tool_name == "replace":
-            old = call.payload.get("old", "")
-            new = call.payload.get("new", "")
-            old_preview = old if len(old) <= 160 else old[:160] + "..."
-            new_preview = new if len(new) <= 160 else new[:160] + "..."
-            return (
-                f"{call.payload.get('path', '')}\n"
-                f"旧文本:\n{old_preview}\n\n"
-                f"新文本:\n{new_preview}"
-            )
+            replacements = call.payload.get("replacements", [])
+            lines = [str(call.payload.get("path", ""))]
+            for index, item in enumerate(replacements, 1):
+                old = item.get("old", "")
+                new = item.get("new", "")
+                old_preview = old if len(old) <= 120 else old[:120] + "..."
+                new_preview = new if len(new) <= 120 else new[:120] + "..."
+                lines.append(f"\n[{index}] 旧文本:\n{old_preview}\n\n新文本:\n{new_preview}")
+            return "\n".join(lines)
         if call.tool_name == "command":
             return str(call.payload.get("content", ""))
+        if call.tool_name == "background":
+            parts = [
+                f"任务标题：{call.payload.get('title', '')}",
+                f"超时时间：{call.payload.get('timeout_seconds', '')} 秒",
+            ]
+            if call.payload.get("context"):
+                parts.append(f"PowerShell 上下文：{call.payload.get('context')}")
+            parts.append(f"命令：\n{call.payload.get('content', '')}")
+            return "\n".join(parts)
         if call.tool_name == "client_list":
             return "读取已配置 SSH 客户端及连接状态"
         if call.tool_name == "client_connect":
@@ -769,6 +908,7 @@ class MainWindow(QWidget):
 
     def _on_stream_error(self, error: str):
         self.chat_view.finish_stream()
+        self._finish_task_timer(False)
         self._show_error(error)
         self.input_area.set_streaming(False)
         self._stream_worker = None
@@ -777,8 +917,9 @@ class MainWindow(QWidget):
         """User clicked stop — cancel the stream immediately."""
         if self._stream_worker:
             self._stream_worker.cancel()
-            # Don't wait for thread to finish — just finalize UI now
+            # Don't wait for thread to finish – just finalize UI now
             self.chat_view.finish_stream()
+            self._finish_task_timer(False)
             self.input_area.set_streaming(False)
             self._stream_worker = None
             self._reset_tool_flow()
@@ -797,6 +938,7 @@ class MainWindow(QWidget):
         self._tool_queue.clear()
         self._pending_tool_call = None
         self._pending_tool_id = None
+        self._finish_task_timer(False)
         self.input_area.set_streaming(False)
 
     def _show_error(self, msg: str):
@@ -839,9 +981,11 @@ class MainWindow(QWidget):
         self.chat_mgr.save_session(self._current_session)
         self._render_current_session()
         self.input_area.set_streaming(True)
+        self._start_task_timer()
         try:
             self._request_assistant_reply()
         except Exception as e:
+            self._finish_task_timer(False)
             self._show_error(str(e))
             self.input_area.set_streaming(False)
 
@@ -871,9 +1015,11 @@ class MainWindow(QWidget):
         self.chat_mgr.save_session(self._current_session)
         self._render_current_session()
         self.input_area.set_streaming(True)
+        self._start_task_timer()
         try:
             self._request_assistant_reply()
         except Exception as e:
+            self._finish_task_timer(False)
             self._show_error(str(e))
             self.input_area.set_streaming(False)
 
@@ -998,6 +1144,8 @@ class MainWindow(QWidget):
         self._pending_tool_call = None
         self._pending_tool_id = None
         self._tool_flow_stopped = True
+        self._finish_task_timer(False)
+        self.tool_runtime.background_tasks.set_completion_callback(None)
 
         try:
             self.api_client.cancel()

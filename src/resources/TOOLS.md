@@ -99,25 +99,37 @@ text to append
 
 ## 5. 替换文件内容
 
-按 exact 模式替换文件中的一段内容。
+按 exact 模式替换文件中的一段或多段内容。
 
 ```xml
 <tool_calls>
   <replace path="path/to/file.py">
-    <old><![CDATA[
-old snippet
+    <replacement>
+      <old><![CDATA[
+old snippet 1
 ]]></old>
-    <new><![CDATA[
-new snippet
+      <new><![CDATA[
+new snippet 1
 ]]></new>
+    </replacement>
+    <replacement>
+      <old><![CDATA[
+old snippet 2
+]]></old>
+      <new><![CDATA[
+new snippet 2
+]]></new>
+    </replacement>
   </replace>
 </tool_calls>
 ```
 
 规则：
 
-- `<old>` 和 `<new>` 都应放在 CDATA 中。
-- `<old>` 必须在目标文件中恰好命中 1 次；命中 0 次或多次都会失败。
+- 推荐使用一个或多个 `<replacement>` 块，每个块内包含一组 `<old>` 和 `<new>`。
+- 每一组 `<old>` 和 `<new>` 都应放在 CDATA 中。
+- 每一组 `<old>` 都必须在当前待替换文本中恰好命中 1 次；命中 0 次或多次都会失败。
+- 所有替换会在一次 `replace` 调用中完成；只要任意一组失败，整个调用都会失败，不会部分写入。
 
 ## 6. 执行命令
 
@@ -152,7 +164,33 @@ new snippet
 - 同一个持久上下文会保留当前工作目录和会话状态，适合多步命令。
 - 如果你传入一个还不存在的上下文 ID，系统会创建一个新会话。
 
-## 7. 联网搜索
+## 7. 后台任务
+
+在不阻塞当前对话的情况下执行长时间运行的 PowerShell 命令。
+
+```xml
+<tool_calls>
+  <background title="构建前端" timeout_seconds="600"><![CDATA[npm run build]]></background>
+</tool_calls>
+```
+
+如需复用 PowerShell 上下文，也可以显式提供 `context`：
+
+```xml
+<tool_calls>
+  <background title="持续日志监控" context="ops-shell" timeout_seconds="1800"><![CDATA[Get-Location]]></background>
+</tool_calls>
+```
+
+规则：
+
+- `title` 必填，用于展示任务标题。
+- `timeout_seconds` 必填。
+- `context` 可选；不填写时按一次性命令执行，填写后会复用或创建对应 PowerShell 上下文。
+- 调用后会立即返回“任务已启动，ID: xxx”，不会阻塞当前对话。
+- 后台任务完成后，系统会在后续合适时机自动把任务 ID、任务标题、退出码、输出、耗时回传给你。
+
+## 8. 联网搜索
 
 搜索网页结果，返回候选来源，供你后续决定是否继续 `web-fetch`。
 
@@ -179,7 +217,7 @@ new snippet
 - `days` 只在 `topic="news"` 时有意义。
 - `include_domains` 和 `exclude_domains` 使用逗号分隔。
 
-## 8. 抓取网页
+## 9. 抓取网页
 
 抓取网页正文，以 Markdown 形式返回。
 
@@ -193,7 +231,7 @@ new snippet
 
 - 只支持 `http` 和 `https` URL。
 
-## 9. 截图
+## 10. 截图
 
 截取当前整个屏幕。
 
@@ -208,7 +246,7 @@ new snippet
 - 截图结果会作为图片继续传入上下文。
 - 避免连续重复截图。
 
-## 10. 写入剪贴板
+## 11. 写入剪贴板
 
 将文本或文件列表写入系统剪贴板。
 
@@ -242,7 +280,7 @@ new snippet
 - `paths` 使用逗号分隔。
 - 当提供文件路径时，系统会把文件列表写入剪贴板，而不是读取文件内容。
 
-## 11. SSH 工具
+## 12. SSH 工具
 
 > ⚠️ 使用顺序：`client_list` → `client_connect` → `client_command` → `client_disconnect`。
 > - 用户已明确指定服务器名称时，可直接使用该名称调用 `client_connect`，无需先调用 `client_list`；若连接失败再调用 `client_list` 确认可用名称。

@@ -23,6 +23,7 @@ from PySide6.QtCore import QMimeData, QThread, QUrl, Signal
 from PySide6.QtGui import QGuiApplication
 from readability import Document
 
+from src.background_task_manager import BackgroundTaskManager, BackgroundTaskResult
 from src.chat_manager import ATTACHMENTS_DIR
 from src.config import BASE_DIR, Settings
 from src.ssh_manager import (
@@ -95,6 +96,7 @@ class ToolCall:
             "add": "追加内容",
             "replace": "替换内容",
             "command": "执行命令",
+            "background": "后台任务",
             "capture": "截图",
             "web-fetch": "抓取网页",
             "web-search": "联网搜索",
@@ -124,6 +126,7 @@ class ToolParser:
         "add",
         "replace",
         "command",
+        "background",
         "capture",
         "web-fetch",
         "web-search",
@@ -252,15 +255,25 @@ class ToolParser:
             path = (node.get("path") or "").strip()
             if not path:
                 raise ValueError("`replace` requires `path`")
-            old_node = node.find("old")
-            new_node = node.find("new")
-            if old_node is None or new_node is None:
-                raise ValueError("`replace` requires `<old>` and `<new>`")
-            return {
-                "path": path,
-                "old": ToolParser._node_text(old_node),
-                "new": ToolParser._node_text(new_node),
-            }
+            replacements = []
+
+            replacement_nodes = node.findall("replacement")
+            if not replacement_nodes:
+                raise ValueError("`replace` requires one or more `<replacement>` blocks")
+            for index, replacement_node in enumerate(replacement_nodes, 1):
+                old_node = replacement_node.find("old")
+                new_node = replacement_node.find("new")
+                if old_node is None or new_node is None:
+                    raise ValueError(f"`replace.replacement[{index}]` requires `<old>` and `<new>`")
+                replacements.append({
+                    "old": ToolParser._node_text(old_node),
+                    "new": ToolParser._node_text(new_node),
+                })
+
+            if not replacements:
+                raise ValueError("`replace` requires at least one replacement pair")
+
+            return {"path": path, "replacements": replacements}
 
         if tool_name == "search":
             path = (node.get("path") or "").strip()
@@ -300,6 +313,21 @@ class ToolParser:
             if context is not None:
                 context = context.strip() or None
             return {"content": content, "context": context, "timeout_seconds": timeout}
+
+        if tool_name == "background":
+            title = (node.get("title") or "").strip()
+            content = (node.get("content") or ToolParser._node_text(node)).strip()
+            if not title:
+                raise ValueError("`background` requires `title`")
+            if not content:
+                raise ValueError("`background` requires content")
+            timeout = ToolParser._parse_optional_positive_int(node.get("timeout_seconds"), "background.timeout_seconds")
+            if timeout is None:
+                raise ValueError("`background` requires `timeout_seconds`")
+            context = node.get("context")
+            if context is not None:
+                context = context.strip() or None
+            return {"title": title, "content": content, "timeout_seconds": timeout, "context": context}
 
         if tool_name == "client_list":
             return {}
@@ -366,16 +394,18 @@ class ToolParser:
 class PowerShellContextManager:
     def __init__(self):
         self._contexts: dict[str, subprocess.Popen] = {}
+        self._context_io_locks: dict[str, threading.Lock] = {}
         self._lock = threading.Lock()
 
     def close_all(self):
         with self._lock:
             contexts = list(self._contexts.values())
             self._contexts.clear()
+            self._context_io_locks.clear()
         for process in contexts:
             self._close_process(process)
 
-    def run_once(self, command: str, timeout_seconds: int | None = None) -> tuple[str, bool]:
+    def run_once_detailed(self, command: str, timeout_seconds: int | None = None) -> tuple[str, bool, int | None]:
         effective_timeout = timeout_seconds if timeout_seconds is not None else _COMMAND_TIMEOUT_SECONDS
         marker = self._create_marker()
         process = self._create_process()
@@ -383,7 +413,7 @@ class PowerShellContextManager:
             assert process.stdin is not None
             process.stdin.write(self._build_capture_script(command, marker) + "\n")
             process.stdin.flush()
-            decoded, timed_out = self._read_until_marker(process, marker, effective_timeout)
+            decoded, timed_out, exit_code = self._read_until_marker(process, marker, effective_timeout)
         finally:
             self._close_process(process)
 
@@ -392,11 +422,20 @@ class PowerShellContextManager:
                 f"命令执行超过 {effective_timeout} 秒，当前一次性 PowerShell 进程已被关闭。"
                 " 如果这个命令本来就需要交互输入，请改用更明确、不会阻塞的命令。"
             )
-            return timeout_text, True
+            return timeout_text, True, None
 
-        return decoded, False
+        return decoded, False, exit_code
 
-    def run(self, command: str, context_id: str | None, timeout_seconds: int | None = None) -> tuple[str, str, bool, bool]:
+    def run_once(self, command: str, timeout_seconds: int | None = None) -> tuple[str, bool]:
+        output, timed_out, _ = self.run_once_detailed(command, timeout_seconds)
+        return output, timed_out
+
+    def run_detailed(
+        self,
+        command: str,
+        context_id: str | None,
+        timeout_seconds: int | None = None,
+    ) -> tuple[str, str, bool, bool, int | None]:
         with self._lock:
             created = False
             if not context_id:
@@ -406,43 +445,50 @@ class PowerShellContextManager:
                 context_id = self._create_context_locked(context_id)
                 created = True
             process = self._contexts[context_id]
+            context_lock = self._context_io_locks[context_id]
 
-        marker = self._create_marker()
-        script = self._build_capture_script(command, marker)
-        try:
-            assert process.stdin is not None
-            process.stdin.write(script + "\n")
-            process.stdin.flush()
-        except Exception:
-            with self._lock:
-                self._contexts.pop(context_id, None)
-            self._close_process(process)
-            process = self._create_process()
-            with self._lock:
-                self._contexts[context_id] = process
-            assert process.stdin is not None
-            process.stdin.write(script + "\n")
-            process.stdin.flush()
+        with context_lock:
+            marker = self._create_marker()
+            script = self._build_capture_script(command, marker)
+            try:
+                assert process.stdin is not None
+                process.stdin.write(script + "\n")
+                process.stdin.flush()
+            except Exception:
+                with self._lock:
+                    self._contexts.pop(context_id, None)
+                self._close_process(process)
+                process = self._create_process()
+                with self._lock:
+                    self._contexts[context_id] = process
+                assert process.stdin is not None
+                process.stdin.write(script + "\n")
+                process.stdin.flush()
 
-        effective_timeout = timeout_seconds if timeout_seconds is not None else _COMMAND_TIMEOUT_SECONDS
-        output, timed_out = self._read_until_marker(
-            process,
-            marker,
-            effective_timeout,
-            timeout_closer=lambda: self._close_context_process(context_id, process),
-        )
+            effective_timeout = timeout_seconds if timeout_seconds is not None else _COMMAND_TIMEOUT_SECONDS
+            output, timed_out, exit_code = self._read_until_marker(
+                process,
+                marker,
+                effective_timeout,
+                timeout_closer=lambda: self._close_context_process(context_id, process),
+            )
         if timed_out:
             timeout_text = (
                 f"命令执行超过 {effective_timeout} 秒，当前 PowerShell 上下文已被关闭。"
                 " 如果这个命令本来就需要交互输入，请改用更明确、不会阻塞的命令。"
             )
-            return context_id, timeout_text, created, True
+            return context_id, timeout_text, created, True, None
 
-        return context_id, output, created, False
+        return context_id, output, created, False, exit_code
+
+    def run(self, command: str, context_id: str | None, timeout_seconds: int | None = None) -> tuple[str, str, bool, bool]:
+        context_id, output, created, timed_out, _ = self.run_detailed(command, context_id, timeout_seconds)
+        return context_id, output, created, timed_out
 
     def _create_context_locked(self, context_id: str | None = None) -> str:
         context_id = context_id or uuid.uuid4().hex[:8]
         self._contexts[context_id] = self._create_process()
+        self._context_io_locks[context_id] = threading.Lock()
         return context_id
 
     def _close_context_process(self, context_id: str, process: subprocess.Popen):
@@ -450,6 +496,7 @@ class PowerShellContextManager:
             current = self._contexts.get(context_id)
             if current is process:
                 self._contexts.pop(context_id, None)
+                self._context_io_locks.pop(context_id, None)
         self._close_process(process)
 
     @staticmethod
@@ -508,21 +555,32 @@ class PowerShellContextManager:
             f"$__peekMarker = {marker_literal}\n"
             f"$__peekCommand = {json.dumps(command_literal)}\n"
             "$__peekSource = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($__peekCommand)); "
-            "try { $__peekOutput = (& ([ScriptBlock]::Create($__peekSource)) *>&1 | Out-String -Width 4096) } "
-            "catch { $__peekOutput = ($_ | Out-String -Width 4096) }; "
-            "$__peekBytes = [System.Text.Encoding]::UTF8.GetBytes($__peekOutput); "
+            "$__peekExitCode = 0; "
+            "try { "
+            "$__peekOutput = (& ([ScriptBlock]::Create($__peekSource)) *>&1 | Out-String -Width 4096); "
+            "if ($LASTEXITCODE -is [int]) { $__peekExitCode = $LASTEXITCODE } "
+            "} catch { "
+            "$__peekOutput = ($_ | Out-String -Width 4096); "
+            "$__peekExitCode = if ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 } "
+            "}; "
+            "$__peekResult = @{ output = $__peekOutput; exit_code = $__peekExitCode } | ConvertTo-Json -Compress -Depth 4; "
+            "$__peekBytes = [System.Text.Encoding]::UTF8.GetBytes($__peekResult); "
             "$__peekPayload = [Convert]::ToBase64String($__peekBytes); "
             'Write-Output ($__peekMarker + $__peekPayload)' "\n"
         )
 
     @staticmethod
-    def _decode_payload(payload: str | None) -> str:
+    def _decode_payload(payload: str | None) -> tuple[str, int | None]:
         if not payload:
-            return ""
+            return "", None
         try:
-            return base64.b64decode(payload).decode("utf-8").strip()
+            decoded = base64.b64decode(payload).decode("utf-8")
+            data = json.loads(decoded)
+            if isinstance(data, dict):
+                return str(data.get("output", "")).strip(), data.get("exit_code")
+            return decoded.strip(), None
         except Exception:
-            return payload.strip()
+            return payload.strip(), None
 
     @staticmethod
     def _read_until_marker(
@@ -530,7 +588,7 @@ class PowerShellContextManager:
         marker: str,
         timeout_seconds: int,
         timeout_closer=None,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, int | None]:
         timed_out = threading.Event()
 
         def on_timeout():
@@ -560,20 +618,22 @@ class PowerShellContextManager:
             timer.cancel()
 
         if timed_out.is_set():
-            return "", True
+            return "", True, None
 
-        output = PowerShellContextManager._decode_payload(payload)
+        output, exit_code = PowerShellContextManager._decode_payload(payload)
         if not output and raw_lines:
             output = "\n".join(raw_lines).strip()
-        return output, False
+        return output, False, exit_code
 
 
 class ToolRuntime:
     def __init__(self):
         self.settings = Settings()
         self.command_contexts = PowerShellContextManager()
+        self.background_tasks = BackgroundTaskManager(self._run_background_command)
 
     def close(self):
+        self.background_tasks.close()
         self.command_contexts.close_all()
         disconnect_all_clients()
 
@@ -591,7 +651,11 @@ class ToolRuntime:
         if tool_name == "search":
             return "auto" if self.settings.get("tools", "search_enabled", True) else "off"
         if tool_name == "capture":
-            return "auto" if self.settings.get("tools", "capture_enabled", True) else "off"
+            return self.settings.get("tools", "capture_mode", "manual")
+        if tool_name == "background":
+            return self.settings.get("tools", "command_mode", "manual")
+        if tool_name == "web-fetch":
+            return "auto" if self.settings.get("tools", "web_fetch_enabled", True) else "off"
         if tool_name == "web-search":
             return "auto" if self.settings.get("tools", "web_search_enabled", True) else "off"
         if tool_name == "clipboard":
@@ -603,6 +667,22 @@ class ToolRuntime:
 
     def _get_tavily_api_key(self) -> str:
         return (self.settings.get("integrations", "tavily_api_key", "") or "").strip()
+
+    def _run_background_command(
+        self,
+        command: str,
+        context_id: str | None,
+        timeout_seconds: int | None,
+    ) -> tuple[str, bool, int | None, str | None]:
+        if context_id:
+            context_id, output, _, timed_out, exit_code = self.command_contexts.run_detailed(
+                command,
+                context_id,
+                timeout_seconds,
+            )
+            return output, timed_out, exit_code, context_id
+        output, timed_out, exit_code = self.command_contexts.run_once_detailed(command, timeout_seconds)
+        return output, timed_out, exit_code, None
 
     def execute(self, call: ToolCall, session_id: str | None = None) -> ToolResult:
         if call.parse_error:
@@ -622,6 +702,8 @@ class ToolRuntime:
                 return self._replace(call.payload)
             if call.tool_name == "command":
                 return self._command(call.payload)
+            if call.tool_name == "background":
+                return self._background(call.payload, session_id)
             if call.tool_name == "capture":
                 return self._capture(session_id)
             if call.tool_name == "web-fetch":
@@ -776,27 +858,33 @@ class ToolRuntime:
         content = self._success_content(f"已在文件末尾追加内容：{path}")
         return ToolResult("add", "success", detail, content)
 
-    def _replace(self, payload: dict[str, str]) -> ToolResult:
+    def _replace(self, payload: dict[str, Any]) -> ToolResult:
         path = self._resolve_path(payload["path"])
         if not path.exists():
             raise FileNotFoundError(f"文件不存在：{path}")
 
         original = path.read_text(encoding="utf-8")
-        old = payload["old"]
-        new = payload["new"]
-        if not old:
-            raise ValueError("`replace.old` 不能为空")
+        replacements = payload.get("replacements") or []
+        if not replacements:
+            raise ValueError("`replace` requires at least one replacement pair")
 
-        match_count = original.count(old)
-        if match_count == 0:
-            raise ValueError("未找到匹配的旧文本")
-        if match_count > 1:
-            raise ValueError(f"旧文本命中了 {match_count} 处，`replace` exact 模式只允许唯一命中")
+        new_text = original
+        for index, item in enumerate(replacements, 1):
+            old = item.get("old", "")
+            new = item.get("new", "")
+            if not old:
+                raise ValueError(f"`replace.replacements[{index}].old` 不能为空")
 
-        new_text = original.replace(old, new, 1)
+            match_count = new_text.count(old)
+            if match_count == 0:
+                raise ValueError(f"第 {index} 组未找到匹配的旧文本")
+            if match_count > 1:
+                raise ValueError(f"第 {index} 组旧文本命中了 {match_count} 处，`replace` exact 模式只允许唯一命中")
+
+            new_text = new_text.replace(old, new, 1)
         path.write_text(new_text, encoding="utf-8")
         detail = str(path)
-        content = self._success_content(f"已精确替换文件内容：{path}")
+        content = self._success_content(f"已精确替换文件内容：{path}\n共执行 {len(replacements)} 组替换")
         return ToolResult("replace", "success", detail, content)
 
     def _command(self, payload: dict[str, Any]) -> ToolResult:
@@ -841,6 +929,35 @@ class ToolRuntime:
             info = "本次未保留终端上下文。\n未产生可见输出。"
         content = self._success_content(info)
         return ToolResult("command", "success", detail, content)
+
+    def _background(self, payload: dict[str, Any], session_id: str | None) -> ToolResult:
+        context_line = f"PowerShell 上下文：{payload.get('context')}\n" if payload.get("context") else ""
+        task_id = self.background_tasks.start_task(
+            title=payload["title"],
+            command=payload["content"],
+            context_id=payload.get("context"),
+            timeout_seconds=payload["timeout_seconds"],
+            session_id=session_id,
+        )
+        detail = (
+            f"任务ID：{task_id}\n"
+            f"任务标题：{payload['title']}\n"
+            f"超时时间：{payload['timeout_seconds']} 秒\n"
+            f"{context_line}"
+            f"命令：\n{payload['content']}"
+        )
+        content = self._success_content(f"任务已启动，ID: {task_id}")
+        return ToolResult(
+            "background",
+            "success",
+            detail,
+            content,
+            meta={
+                "task_id": task_id,
+                "title": payload["title"],
+                "timeout_seconds": payload["timeout_seconds"],
+            },
+        )
 
     def _capture(self, session_id: str | None) -> ToolResult:
         attach_dir = ATTACHMENTS_DIR / session_id if session_id else ATTACHMENTS_DIR / "tool-temp"

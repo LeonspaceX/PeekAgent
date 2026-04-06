@@ -96,6 +96,7 @@ class ChatView(QWebEngineView):
             "tool_add": self._icon_data_uri(FluentIcon.ADD),
             "tool_replace": self._icon_data_uri(FluentIcon.EDIT),
             "tool_command": self._icon_data_uri(FluentIcon.DEVELOPER_TOOLS),
+            "tool_background": self._icon_data_uri(FluentIcon.HISTORY),
             "tool_capture": self._icon_data_uri(FluentIcon.CAMERA),
             "tool_web-fetch": self._icon_data_uri(FluentIcon.GLOBE),
             "tool_web-search": self._icon_data_uri(FluentIcon.SEARCH),

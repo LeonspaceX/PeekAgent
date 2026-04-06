@@ -1,4 +1,4 @@
-"""Shared LLM endpoint adapter for OpenAI-compatible and Anthropic-compatible APIs."""
+"""Shared LLM endpoint adapter for OpenAI-compatible, Anthropic-compatible, and Gemini APIs."""
 
 from __future__ import annotations
 
@@ -28,6 +28,8 @@ def build_request_headers(api_key: str, endpoint_type: str, stream: bool = False
     if endpoint_type == "anthropic":
         headers["x-api-key"] = api_key
         headers["anthropic-version"] = ANTHROPIC_VERSION
+    elif endpoint_type == "gemini":
+        headers["x-goog-api-key"] = api_key
     else:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
@@ -67,6 +69,21 @@ def _extract_anthropic_text(message_content) -> str:
     return ""
 
 
+def _extract_gemini_text(parts) -> str:
+    if isinstance(parts, str):
+        return parts
+    if isinstance(parts, list):
+        texts = []
+        for item in parts:
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text", "")
+            if text:
+                texts.append(text)
+        return "".join(texts)
+    return ""
+
+
 def _data_url_to_anthropic_source(url: str) -> dict | None:
     if not url.startswith("data:") or ";base64," not in url:
         return None
@@ -101,7 +118,16 @@ class LLMClient:
         })
 
     def _messages_path(self) -> str:
-        return "/messages" if self.endpoint_type == "anthropic" else "/chat/completions"
+        if self.endpoint_type == "anthropic":
+            return "/messages"
+        if self.endpoint_type == "gemini":
+            return ""
+        return "/chat/completions"
+
+    @staticmethod
+    def _normalize_gemini_model_name(model: str) -> str:
+        model = (model or "").strip()
+        return model if model.startswith("models/") else f"models/{model}"
 
     def _build_openai_payload(self, config: RequestConfig) -> dict:
         messages = list(config.messages)
@@ -163,10 +189,79 @@ class LLMClient:
             payload.update(config.extra_payload)
         return payload
 
+    def _convert_gemini_part(self, item: dict) -> dict | None:
+        item_type = item.get("type")
+        if item_type == "text":
+            text = item.get("text", "")
+            if text:
+                return {"text": text}
+        elif item_type == "image_url":
+            image_url = item.get("image_url", {}).get("url", "")
+            source = _data_url_to_anthropic_source(image_url)
+            if source:
+                return {
+                    "inline_data": {
+                        "mime_type": source["media_type"],
+                        "data": source["data"],
+                    }
+                }
+        return None
+
+    def _convert_gemini_content(self, content) -> list[dict]:
+        if isinstance(content, str):
+            return [{"text": content}]
+        if not isinstance(content, list):
+            return [{"text": str(content)}]
+
+        parts = []
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            part = self._convert_gemini_part(item)
+            if part:
+                parts.append(part)
+        return parts or [{"text": ""}]
+
+    def _build_gemini_payload(self, config: RequestConfig) -> dict:
+        contents = []
+        for message in config.messages:
+            role = message.get("role")
+            if role == "system":
+                continue
+            contents.append({
+                "role": "model" if role == "assistant" else "user",
+                "parts": self._convert_gemini_content(message.get("content", "")),
+            })
+
+        payload = {"contents": contents}
+        if config.system_prompt:
+            payload["system_instruction"] = {
+                "parts": [{"text": config.system_prompt}],
+            }
+        generation_config = {}
+        if config.max_tokens is not None:
+            generation_config["maxOutputTokens"] = config.max_tokens
+        if generation_config:
+            payload["generationConfig"] = generation_config
+        if config.extra_payload:
+            payload.update(config.extra_payload)
+        return payload
+
     def build_payload(self, config: RequestConfig) -> dict:
         if self.endpoint_type == "anthropic":
             return self._build_anthropic_payload(config)
+        if self.endpoint_type == "gemini":
+            return self._build_gemini_payload(config)
         return self._build_openai_payload(config)
+
+    def _build_request_url(self, model: str, stream: bool = False) -> str:
+        if self.endpoint_type != "gemini":
+            return f"{self.base_url}{self._messages_path()}"
+        action = "streamGenerateContent" if stream else "generateContent"
+        url = f"{self.base_url}/{self._normalize_gemini_model_name(model)}:{action}"
+        if stream:
+            url = f"{url}?alt=sse"
+        return url
 
     def create_completion(self, model: str, messages: list, system_prompt: str = "", **extra_payload) -> dict:
         max_tokens = extra_payload.pop("max_tokens", None)
@@ -178,7 +273,7 @@ class LLMClient:
             extra_payload=extra_payload or None,
         ))
         response = self.session.post(
-            f"{self.base_url}{self._messages_path()}",
+            self._build_request_url(model, stream=False),
             json=payload,
             headers=build_request_headers(self.api_key, self.endpoint_type),
             timeout=(10, 60),
@@ -197,7 +292,7 @@ class LLMClient:
             extra_payload=extra_payload or None,
         ))
         response = self.session.post(
-            f"{self.base_url}{self._messages_path()}",
+            self._build_request_url(model, stream=True),
             json=payload,
             headers=build_request_headers(self.api_key, self.endpoint_type, stream=True),
             timeout=(10, 300),
@@ -208,6 +303,35 @@ class LLMClient:
         return response
 
     def fetch_models(self) -> list[str]:
+        if self.endpoint_type == "gemini":
+            models = []
+            page_token = ""
+            while True:
+                params = {}
+                params["pageSize"] = 1000
+                if page_token:
+                    params["pageToken"] = page_token
+                response = self.session.get(
+                    f"{self.base_url}/models",
+                    params=params,
+                    headers=build_request_headers(self.api_key, self.endpoint_type),
+                    timeout=(10, 30),
+                )
+                response.raise_for_status()
+                data = response.json()
+                for model in data.get("models", []):
+                    if not isinstance(model, dict):
+                        continue
+                    methods = model.get("supportedGenerationMethods") or model.get("supported_generation_methods") or []
+                    if methods and "generateContent" not in methods:
+                        continue
+                    model_id = model.get("name", "") or model.get("baseModelId") or model.get("base_model_id", "")
+                    if model_id:
+                        models.append(model_id)
+                page_token = data.get("nextPageToken", "")
+                if not page_token:
+                    break
+            return sorted(set(models))
         response = self.session.get(
             f"{self.base_url}/models",
             headers=build_request_headers(self.api_key, self.endpoint_type),
@@ -229,6 +353,12 @@ class LLMClient:
     def extract_text(self, response_json: dict) -> str:
         if self.endpoint_type == "anthropic":
             return _extract_anthropic_text(response_json.get("content", []))
+        if self.endpoint_type == "gemini":
+            candidates = response_json.get("candidates") or []
+            if not candidates:
+                return ""
+            content = candidates[0].get("content", {})
+            return _extract_gemini_text(content.get("parts", []))
         choices = response_json.get("choices") or []
         if not choices:
             return ""
@@ -260,6 +390,8 @@ class StreamWorker(QThread):
                 self._response = response
                 if self.client.endpoint_type == "anthropic":
                     full_text = self._run_anthropic_stream(response)
+                elif self.client.endpoint_type == "gemini":
+                    full_text = self._run_gemini_stream(response)
                 else:
                     full_text = self._run_openai_stream(response)
             if not self._cancelled:
@@ -324,6 +456,30 @@ class StreamWorker(QThread):
                 self.token_received.emit(chunk_text)
             if event_type == "message_stop":
                 break
+        return full_text
+
+    def _run_gemini_stream(self, response) -> str:
+        full_text = ""
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if self._cancelled:
+                return full_text
+            if not raw_line:
+                continue
+            line = _decode_sse_line(raw_line).strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data:
+                continue
+            event = json.loads(data)
+            candidates = event.get("candidates") or []
+            if not candidates:
+                continue
+            content = candidates[0].get("content", {})
+            chunk_text = _extract_gemini_text(content.get("parts", []))
+            if chunk_text:
+                full_text += chunk_text
+                self.token_received.emit(chunk_text)
         return full_text
 
     def cancel(self):
