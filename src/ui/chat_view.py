@@ -18,6 +18,7 @@ class _ChatBridge(QObject):
     editRequested = Signal(int, str)
     regenerateRequested = Signal(int)
     toolApprovalRequested = Signal(str, bool)
+    loadOlderRequested = Signal()
 
     @Slot(int)
     def copyMessage(self, index: int):
@@ -39,6 +40,10 @@ class _ChatBridge(QObject):
     def denyTool(self, tool_id: str):
         self.toolApprovalRequested.emit(tool_id, False)
 
+    @Slot()
+    def loadOlderMessages(self):
+        self.loadOlderRequested.emit()
+
 
 class _ChatPage(QWebEnginePage):
     def acceptNavigationRequest(self, url, nav_type, is_main_frame):
@@ -53,6 +58,7 @@ class ChatView(QWebEngineView):
     edit_requested = Signal(int, str)
     regenerate_requested = Signal(int)
     tool_approval_requested = Signal(str, bool)
+    load_older_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,6 +74,7 @@ class ChatView(QWebEngineView):
         self._bridge.editRequested.connect(self.edit_requested)
         self._bridge.regenerateRequested.connect(self.regenerate_requested)
         self._bridge.toolApprovalRequested.connect(self.tool_approval_requested)
+        self._bridge.loadOlderRequested.connect(self.load_older_requested)
         # Prevent flicker when parent has WA_TranslucentBackground
         self.page().setBackgroundColor(QColor("#181818") if self._dark_mode else QColor(255, 255, 255))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -144,6 +151,15 @@ class ChatView(QWebEngineView):
 
     def update_tool_message(self, payload: dict):
         self._run_js(f"updateToolMessage({self._to_js_arg(payload)});")
+
+    def render_items(self, items: list[dict]):
+        self._run_js(f"renderItems({self._to_js_arg(items)});")
+
+    def prepend_items(self, items: list[dict], has_more: bool):
+        self._run_js(f"prependItems({self._to_js_arg(items)}, {json.dumps(bool(has_more))});")
+
+    def set_has_older_messages(self, has_more: bool):
+        self._run_js(f"setHasOlderMessages({json.dumps(bool(has_more))});")
 
     def start_stream(self, index: int):
         self._run_js(f"startStream({index});")

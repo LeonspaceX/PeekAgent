@@ -52,6 +52,7 @@ DEFAULT_SETTINGS = {
         "external_prompt_editor_enabled": False,
         "task_complete_notification_enabled": False,
         "task_complete_notification_threshold_seconds": 30,
+        "tool_result_context_limit": 5,
         "github_mirror": "https://v6.gh-proxy.org/",
     },
     "appearance": {
@@ -77,10 +78,16 @@ DEFAULT_SETTINGS = {
         "auto_tool_round_limit": 8,
     },
     "model": {
-        "endpoint_url": "",
-        "api_key": "",
+        "channels": [
+            {
+                "name": "默认渠道",
+                "endpoint_url": "",
+                "api_key": "",
+                "endpoint_type": "openai",
+            }
+        ],
+        "active_channel_index": 0,
         "model_name": "",
-        "endpoint_type": "openai",
         "stream": True,
     },
     "integrations": {
@@ -135,6 +142,85 @@ def build_default_highlight_theme_bundle() -> dict:
     return bundle or {"light": {}, "dark": {}}
 
 
+def _normalize_model_channel(channel: dict, fallback_name: str = "默认渠道") -> dict:
+    endpoint_type = channel.get("endpoint_type", channel.get("endpoint_format", "openai"))
+    if endpoint_type not in {"openai", "anthropic", "gemini"}:
+        endpoint_type = "openai"
+    name = str(channel.get("name") or fallback_name).strip() or fallback_name
+    return {
+        "name": name,
+        "endpoint_url": str(channel.get("endpoint_url", channel.get("endpoint", ""))),
+        "api_key": str(channel.get("api_key", "")),
+        "endpoint_type": endpoint_type,
+    }
+
+
+def migrate_model_settings(data: dict) -> bool:
+    """Migrate model settings to channels format in-place.
+
+    Returns True when the input data changed and should be persisted.
+    """
+    if not isinstance(data, dict):
+        return False
+    model_settings = data.get("model")
+    if not isinstance(model_settings, dict):
+        return False
+
+    changed = False
+    has_legacy_endpoint = "endpoint_url" in model_settings or "endpoint" in model_settings
+    if "channels" not in model_settings and has_legacy_endpoint:
+        model_settings["channels"] = [
+            _normalize_model_channel(
+                {
+                    "name": "默认渠道",
+                    "endpoint_url": model_settings.get("endpoint_url", model_settings.get("endpoint", "")),
+                    "api_key": model_settings.get("api_key", ""),
+                    "endpoint_type": model_settings.get(
+                        "endpoint_type",
+                        model_settings.get("endpoint_format", "openai"),
+                    ),
+                }
+            )
+        ]
+        model_settings["active_channel_index"] = 0
+        changed = True
+
+    if "channels" in model_settings:
+        channels = model_settings.get("channels")
+        if not isinstance(channels, list):
+            channels = []
+            changed = True
+        normalized_channels = []
+        for index, channel in enumerate(channels):
+            if not isinstance(channel, dict):
+                changed = True
+                continue
+            normalized = _normalize_model_channel(channel, f"渠道{index + 1}")
+            if normalized != channel:
+                changed = True
+            normalized_channels.append(normalized)
+        if not normalized_channels:
+            normalized_channels = deepcopy(DEFAULT_SETTINGS["model"]["channels"])
+            changed = True
+        model_settings["channels"] = normalized_channels
+
+        active_index = model_settings.get("active_channel_index", 0)
+        if not isinstance(active_index, int):
+            active_index = 0
+            changed = True
+        clamped_index = max(0, min(active_index, len(normalized_channels) - 1))
+        if clamped_index != active_index:
+            changed = True
+        model_settings["active_channel_index"] = clamped_index
+
+    for legacy_key in ("endpoint_url", "endpoint", "api_key", "endpoint_type", "endpoint_format"):
+        if legacy_key in model_settings:
+            model_settings.pop(legacy_key, None)
+            changed = True
+
+    return changed
+
+
 def load_highlight_theme_bundle(path: Path = HIGHLIGHT_THEME_PATH) -> dict | None:
     if not path.exists():
         return None
@@ -182,30 +268,21 @@ class Settings:
                     self._data = json.load(f)
             else:
                 self._data = build_initial_settings()
+            needs_save = migrate_model_settings(self._data)
             # Merge defaults for any missing keys
             for section, defaults in DEFAULT_SETTINGS.items():
                 if section not in self._data:
-                    self._data[section] = dict(defaults)
+                    self._data[section] = deepcopy(defaults)
+                    needs_save = True
                 else:
                     for key, val in defaults.items():
                         if key not in self._data[section]:
-                            self._data[section][key] = val
-            self._migrate_legacy_settings()
-
-    def _migrate_legacy_settings(self):
-        tools = self._data.setdefault("tools", {})
-
-        if "capture_enabled" in tools:
-            legacy_capture_enabled = tools.pop("capture_enabled")
-            tools["capture_mode"] = "manual" if legacy_capture_enabled else "off"
-        elif "capture_mode" not in tools:
-            tools["capture_mode"] = DEFAULT_SETTINGS["tools"]["capture_mode"]
-
-        if "web_fetch_mode" in tools:
-            legacy_web_fetch_mode = tools.pop("web_fetch_mode")
-            tools["web_fetch_enabled"] = str(legacy_web_fetch_mode).strip().lower() != "off"
-        elif "web_fetch_enabled" not in tools:
-            tools["web_fetch_enabled"] = DEFAULT_SETTINGS["tools"]["web_fetch_enabled"]
+                            self._data[section][key] = deepcopy(val)
+                            needs_save = True
+            if migrate_model_settings(self._data):
+                needs_save = True
+            if needs_save:
+                self.save()
 
     def save(self):
         with self._data_lock:
@@ -217,12 +294,36 @@ class Settings:
         with self._data_lock:
             return self._data.get(section, {}).get(key, default)
 
-    def set(self, section: str, key: str, value):
+    def set(self, section: str, key: str, value, save: bool = True):
         with self._data_lock:
             if section not in self._data:
                 self._data[section] = {}
             self._data[section][key] = value
-            self.save()
+            if save:
+                self.save()
+
+    def save_model_active_channel_index(self, index: int):
+        with self._data_lock:
+            model_settings = self._data.setdefault("model", {})
+            model_settings["active_channel_index"] = index
+
+            SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if SETTINGS_PATH.exists():
+                try:
+                    file_data = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+                except Exception:
+                    file_data = deepcopy(self._data)
+            else:
+                file_data = deepcopy(self._data)
+            if not isinstance(file_data, dict):
+                file_data = deepcopy(self._data)
+            migrate_model_settings(file_data)
+            file_model = file_data.setdefault("model", {})
+            file_model["active_channel_index"] = index
+            SETTINGS_PATH.write_text(
+                json.dumps(file_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     @property
     def data(self) -> dict:

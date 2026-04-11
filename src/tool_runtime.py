@@ -138,13 +138,14 @@ class ToolParser:
     }
 
     @staticmethod
-    def parse_response(text: str) -> tuple[str, list[ToolCall]]:
+    def parse_response(text: str) -> tuple[str, list[list[ToolCall]]]:
         masked_text, placeholders = ToolParser._mask_none_blocks(text)
-        calls: list[ToolCall] = []
+        groups: list[list[ToolCall]] = []
         display = _TOOL_CALLS_PATTERN.sub('', masked_text)
 
         for match in _TOOL_CALLS_PATTERN.finditer(masked_text):
             tool_block = match.group(1)
+            calls: list[ToolCall] = []
             try:
                 root = ET.fromstring(f"<tool_calls>{tool_block}</tool_calls>")
                 for child in root:
@@ -158,13 +159,28 @@ class ToolParser:
                         payload = ToolParser._parse_tool_payload(child)
                     except Exception as exc:
                         parse_error = str(exc)
-                    calls.append(ToolCall(tool_name=tool_name, raw_body=raw_body, payload=payload, parse_error=parse_error))
+                    calls.append(
+                        ToolCall(
+                            tool_name=tool_name,
+                            raw_body=raw_body,
+                            payload=payload,
+                            parse_error=parse_error,
+                        )
+                    )
             except Exception as exc:
-                calls.append(ToolCall(tool_name="tool_calls", raw_body=tool_block, parse_error=str(exc)))
+                calls.append(
+                    ToolCall(
+                        tool_name="tool_calls",
+                        raw_body=tool_block,
+                        parse_error=str(exc),
+                    )
+                )
+            if calls:
+                groups.append(calls)
 
         for key, value in placeholders.items():
             display = display.replace(key, value)
-        return display.strip(), calls
+        return display.strip(), groups
 
     @staticmethod
     def _mask_none_blocks(text: str) -> tuple[str, dict[str, str]]:

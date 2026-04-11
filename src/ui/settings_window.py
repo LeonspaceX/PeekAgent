@@ -5,13 +5,14 @@ import json
 import math
 import os
 import requests
+from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QIntValidator
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QStackedWidget,
-    QFormLayout, QFrame, QButtonGroup, QFileDialog,
+    QFormLayout, QFrame, QButtonGroup, QFileDialog, QGroupBox,
     QDialog, QListWidget, QListWidgetItem, QAbstractItemView,
 )
 from qfluentwidgets import (
@@ -256,6 +257,9 @@ class SettingsWindow(QWidget):
         self._update_check_in_flight = False
         self._latest_release_info: ReleaseInfo | None = None
         self._update_dialog = None
+        self._model_channels: list[dict] = []
+        self._editing_channel_index = 0
+        self._active_channel_index = 0
         self.setObjectName("settingsWindow")
         self.setWindowTitle("PeekAgent 设置")
         self.setWindowFlags(Qt.WindowType.Window)
@@ -395,6 +399,12 @@ class SettingsWindow(QWidget):
         self.task_complete_notification_switch.checkedChanged.connect(
             self._update_task_notification_threshold_enabled
         )
+
+        self.tool_result_context_limit_edit = LineEdit(self)
+        self.tool_result_context_limit_edit.setPlaceholderText("5，0 为不限制")
+        self.tool_result_context_limit_edit.setToolTip("按 <tool_calls> 块计数；0 或 1000000 及以上表示不限制。")
+        self.tool_result_context_limit_edit.setValidator(QIntValidator(0, 2147483647, self))
+        form.addRow("工具调用结果携带数:", self.tool_result_context_limit_edit)
 
         self.github_mirror_edit = LineEdit(self)
         self.github_mirror_edit.setPlaceholderText("留空则直连 GitHub")
@@ -547,6 +557,162 @@ class SettingsWindow(QWidget):
             encoding="utf-8",
         )
 
+    @staticmethod
+    def _normalize_channel(channel: dict, fallback_name: str) -> dict:
+        endpoint_type = channel.get("endpoint_type", channel.get("endpoint_format", "openai"))
+        if endpoint_type not in {"openai", "anthropic", "gemini"}:
+            endpoint_type = "openai"
+        name = str(channel.get("name") or fallback_name).strip() or fallback_name
+        return {
+            "name": name,
+            "endpoint_url": str(channel.get("endpoint_url", channel.get("endpoint", ""))),
+            "api_key": str(channel.get("api_key", "")),
+            "endpoint_type": endpoint_type,
+        }
+
+    def _load_model_channels_from_settings(self):
+        channels = self.settings.get("model", "channels", [])
+        if not isinstance(channels, list):
+            channels = []
+        self._model_channels = [
+            self._normalize_channel(channel, f"渠道{index + 1}")
+            for index, channel in enumerate(channels)
+            if isinstance(channel, dict)
+        ]
+        if not self._model_channels:
+            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+        active_index = self.settings.get("model", "active_channel_index", 0)
+        if not isinstance(active_index, int):
+            active_index = 0
+        self._active_channel_index = max(0, min(active_index, len(self._model_channels) - 1))
+        self._editing_channel_index = max(0, min(self._editing_channel_index, len(self._model_channels) - 1))
+
+    def _write_current_channel_from_form(self):
+        if not self._model_channels:
+            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+        index = max(0, min(self._editing_channel_index, len(self._model_channels) - 1))
+        current = deepcopy(self._model_channels[index])
+        current["endpoint_url"] = self.endpoint_url_edit.text()
+        current["api_key"] = self.api_key_edit.text()
+        current["endpoint_type"] = self._current_endpoint_type()
+        self._model_channels[index] = current
+
+    def _load_channel_to_form(self, index: int):
+        if not self._model_channels:
+            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+        index = max(0, min(index, len(self._model_channels) - 1))
+        channel = self._model_channels[index]
+        self._editing_channel_index = index
+        self.endpoint_url_edit.setText(channel.get("endpoint_url", ""))
+        self.api_key_edit.setText(channel.get("api_key", ""))
+        endpoint_type = channel.get("endpoint_type", "openai")
+        self.openai_radio.setChecked(endpoint_type not in {"anthropic", "gemini"})
+        self.anthropic_radio.setChecked(endpoint_type == "anthropic")
+        self.gemini_radio.setChecked(endpoint_type == "gemini")
+        self._refresh_model_endpoint_placeholders()
+
+    def _refresh_channel_controls(self):
+        if not hasattr(self, "channel_combo"):
+            return
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.clear()
+        self.channel_combo.addItems([channel.get("name", f"渠道{index + 1}") for index, channel in enumerate(self._model_channels)])
+        self.channel_combo.setCurrentIndex(self._editing_channel_index)
+        self.channel_combo.blockSignals(False)
+        active_name = self._model_channels[self._active_channel_index].get("name", "")
+        self.active_channel_label.setText(f"活跃渠道: {active_name}")
+        self.set_active_channel_btn.setEnabled(self._editing_channel_index != self._active_channel_index)
+        self.delete_channel_btn.setEnabled(len(self._model_channels) > 1)
+
+    def _next_channel_name(self) -> str:
+        existing_names = {channel.get("name", "") for channel in self._model_channels}
+        index = 1
+        while f"渠道{index}" in existing_names:
+            index += 1
+        return f"渠道{index}"
+
+    def _on_channel_combo_changed(self, index: int):
+        if self._loading_values or index < 0 or index == self._editing_channel_index:
+            return
+        self._write_current_channel_from_form()
+        self._load_channel_to_form(index)
+        self._refresh_channel_controls()
+
+    def _rename_current_channel(self):
+        if not self._model_channels:
+            return
+        current_name = self._model_channels[self._editing_channel_index].get("name", "")
+        dialog = MessageBox("重命名渠道", "渠道名称:", self)
+        dialog.yesButton.setText("确认")
+        dialog.cancelButton.setText("取消")
+
+        name_edit = LineEdit(dialog.widget)
+        name_edit.setText(current_name)
+        name_edit.selectAll()
+        dialog.textLayout.addWidget(name_edit)
+        dialog.widget.setFixedSize(max(dialog.widget.width(), 360), dialog.widget.height() + 48)
+        name_edit.setFocus()
+
+        if not dialog.exec():
+            return
+        name = name_edit.text().strip()
+        if not name:
+            InfoBar.warning("提示", "渠道名称不能为空", parent=self,
+                            position=InfoBarPosition.TOP, duration=3000)
+            return
+        self._model_channels[self._editing_channel_index]["name"] = name
+        self._refresh_channel_controls()
+
+    def _add_channel(self):
+        self._write_current_channel_from_form()
+        self._model_channels.append(
+            {
+                "name": self._next_channel_name(),
+                "endpoint_url": "",
+                "api_key": "",
+                "endpoint_type": "openai",
+            }
+        )
+        self._load_channel_to_form(len(self._model_channels) - 1)
+        self._refresh_channel_controls()
+
+    def _delete_current_channel(self):
+        if len(self._model_channels) <= 1:
+            return
+        channel_name = self._model_channels[self._editing_channel_index].get("name", "")
+        content = f"确定要删除渠道 `{channel_name}` 吗？"
+        if self._editing_channel_index == self._active_channel_index:
+            content += "\n删除后会自动选择一个新的活跃渠道。"
+        dialog = MessageBox("删除渠道", content, self)
+        dialog.yesButton.setText("删除")
+        dialog.cancelButton.setText("取消")
+        if not dialog.exec():
+            return
+        removed_index = self._editing_channel_index
+        self._model_channels.pop(removed_index)
+        if self._active_channel_index == removed_index:
+            self._active_channel_index = min(removed_index, len(self._model_channels) - 1)
+        elif self._active_channel_index > removed_index:
+            self._active_channel_index -= 1
+        next_index = min(removed_index, len(self._model_channels) - 1)
+        self._load_channel_to_form(next_index)
+        self._refresh_channel_controls()
+
+    def _set_current_channel_active(self):
+        self._write_current_channel_from_form()
+        self._active_channel_index = self._editing_channel_index
+        self.settings.set("model", "channels", deepcopy(self._model_channels), save=False)
+        self.settings.save_model_active_channel_index(self._active_channel_index)
+        self._refresh_channel_controls()
+
+    def _active_channel_for_request(self) -> dict:
+        if self._editing_channel_index == self._active_channel_index:
+            self._write_current_channel_from_form()
+        if not self._model_channels:
+            return {}
+        index = max(0, min(self._active_channel_index, len(self._model_channels) - 1))
+        return self._model_channels[index]
+
     def _build_model_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("settingsPage")
@@ -556,14 +722,50 @@ class SettingsWindow(QWidget):
 
         form.addRow(SubtitleLabel("模型设置"))
 
+        channel_group = QGroupBox("渠道配置", self)
+        channel_layout = QVBoxLayout(channel_group)
+        channel_layout.setContentsMargins(12, 12, 12, 12)
+        channel_layout.setSpacing(12)
+
+        channel_top_row = QHBoxLayout()
+        channel_top_row.setSpacing(8)
+        self.channel_combo = ComboBox(self)
+        self.channel_combo.setMinimumWidth(160)
+        self.channel_combo.currentIndexChanged.connect(self._on_channel_combo_changed)
+        channel_top_row.addWidget(self.channel_combo, 1)
+
+        self.active_channel_label = BodyLabel("", self)
+        channel_top_row.addWidget(self.active_channel_label)
+
+        self.set_active_channel_btn = PushButton("设为活跃渠道", self)
+        self.set_active_channel_btn.clicked.connect(self._set_current_channel_active)
+        channel_top_row.addWidget(self.set_active_channel_btn)
+
+        self.rename_channel_btn = PushButton("重命名", self)
+        self.rename_channel_btn.clicked.connect(self._rename_current_channel)
+        channel_top_row.addWidget(self.rename_channel_btn)
+
+        self.add_channel_btn = PushButton("新增", self)
+        self.add_channel_btn.clicked.connect(self._add_channel)
+        channel_top_row.addWidget(self.add_channel_btn)
+
+        self.delete_channel_btn = PushButton("删除", self)
+        self.delete_channel_btn.clicked.connect(self._delete_current_channel)
+        channel_top_row.addWidget(self.delete_channel_btn)
+        channel_layout.addLayout(channel_top_row)
+
+        channel_form = QFormLayout()
+        channel_form.setContentsMargins(0, 0, 0, 0)
+        channel_form.setSpacing(12)
+
         self.endpoint_url_edit = LineEdit(self)
         self.endpoint_url_edit.setPlaceholderText("https://api.openai.com/v1")
-        form.addRow("端点 URL:", self.endpoint_url_edit)
+        channel_form.addRow("端点 URL:", self.endpoint_url_edit)
 
         self.api_key_edit = LineEdit(self)
         self.api_key_edit.setPlaceholderText("sk-...")
         self.api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
-        form.addRow("API Key:", self.api_key_edit)
+        channel_form.addRow("API Key:", self.api_key_edit)
 
         endpoint_row = QHBoxLayout()
         endpoint_row.setSpacing(12)
@@ -581,7 +783,10 @@ class SettingsWindow(QWidget):
         self.openai_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
         self.anthropic_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
         self.gemini_radio.toggled.connect(self._refresh_model_endpoint_placeholders)
-        form.addRow("端点格式:", endpoint_row)
+        channel_form.addRow("端点格式:", endpoint_row)
+
+        channel_layout.addLayout(channel_form)
+        form.addRow(channel_group)
 
         # Model selection row
         model_row = QHBoxLayout()
@@ -991,6 +1196,9 @@ class SettingsWindow(QWidget):
                 str(s.get("general", "task_complete_notification_threshold_seconds", 30))
             )
             self._update_task_notification_threshold_enabled()
+            self.tool_result_context_limit_edit.setText(
+                str(s.get("general", "tool_result_context_limit", 5))
+            )
             self.github_mirror_edit.setText(s.get("general", "github_mirror", "https://v6.gh-proxy.org/"))
 
             self._set_color_picker_value(
@@ -1014,13 +1222,9 @@ class SettingsWindow(QWidget):
             )
             self._refresh_highlight_preview()
 
-            self.endpoint_url_edit.setText(s.get("model", "endpoint_url", ""))
-            self.api_key_edit.setText(s.get("model", "api_key", ""))
-            endpoint_type = s.get("model", "endpoint_type", "openai")
-            self.openai_radio.setChecked(endpoint_type not in {"anthropic", "gemini"})
-            self.anthropic_radio.setChecked(endpoint_type == "anthropic")
-            self.gemini_radio.setChecked(endpoint_type == "gemini")
-            self._refresh_model_endpoint_placeholders()
+            self._load_model_channels_from_settings()
+            self._load_channel_to_form(self._active_channel_index)
+            self._refresh_channel_controls()
             model = s.get("model", "model_name", "")
             if model:
                 self.model_combo.addItem(model)
@@ -1047,41 +1251,44 @@ class SettingsWindow(QWidget):
 
     def _save_values(self):
         s = self.settings
-        s.set("general", "hotkey", self.hotkey_edit.text())
-        s.set("general", "always_on_top", self.always_top_switch.isChecked())
-        s.set("general", "external_prompt_editor_enabled", self.external_prompt_editor_switch.isChecked())
-        s.set("general", "task_complete_notification_enabled", self.task_complete_notification_switch.isChecked())
+        self._write_current_channel_from_form()
+        s.set("general", "hotkey", self.hotkey_edit.text(), save=False)
+        s.set("general", "always_on_top", self.always_top_switch.isChecked(), save=False)
+        s.set("general", "external_prompt_editor_enabled", self.external_prompt_editor_switch.isChecked(), save=False)
+        s.set("general", "task_complete_notification_enabled", self.task_complete_notification_switch.isChecked(), save=False)
         s.set(
             "general",
             "task_complete_notification_threshold_seconds",
             self._task_complete_notification_threshold_value(),
+            save=False,
         )
-        s.set("general", "github_mirror", self.github_mirror_edit.text().strip())
+        s.set("general", "tool_result_context_limit", self._tool_result_context_limit_value(), save=False)
+        s.set("general", "github_mirror", self.github_mirror_edit.text().strip(), save=False)
 
-        s.set("appearance", "theme_mode", self._theme_mode_value())
-        s.set("appearance", "primary_theme_color", self._color_picker_value(self.primary_theme_color_button))
-        s.set("appearance", "theme_color_1", self._color_picker_value(self.theme_color1_button))
-        s.set("appearance", "theme_color_2", self._color_picker_value(self.theme_color2_button))
+        s.set("appearance", "theme_mode", self._theme_mode_value(), save=False)
+        s.set("appearance", "primary_theme_color", self._color_picker_value(self.primary_theme_color_button), save=False)
+        s.set("appearance", "theme_color_1", self._color_picker_value(self.theme_color1_button), save=False)
+        s.set("appearance", "theme_color_2", self._color_picker_value(self.theme_color2_button), save=False)
 
-        s.set("model", "endpoint_url", self.endpoint_url_edit.text())
-        s.set("model", "api_key", self.api_key_edit.text())
-        s.set("model", "endpoint_type", self._current_endpoint_type())
-        s.set("model", "model_name", self._current_model_text())
-        s.set("model", "stream", self.stream_switch.isChecked())
-        s.set("tools", "read_enabled", self.read_switch.isChecked())
-        s.set("tools", "search_enabled", self.search_switch.isChecked())
-        s.set("tools", "capture_mode", self._mode_group_value(self.capture_mode_group))
-        s.set("tools", "web_search_enabled", self.web_search_switch.isChecked())
-        s.set("tools", "clipboard_enabled", self.clipboard_switch.isChecked())
-        s.set("integrations", "tavily_api_key", self.tavily_api_key_edit.text())
-        s.set("tools", "write_mode", self._mode_group_value(self.write_mode_group))
-        s.set("tools", "add_mode", self._mode_group_value(self.add_mode_group))
-        s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group))
-        s.set("tools", "command_mode", self._mode_group_value(self.command_mode_group))
-        s.set("tools", "ssh_remote_command_mode", self._mode_group_value(self.ssh_remote_command_mode_group))
-        s.set("tools", "web_fetch_enabled", self.web_fetch_switch.isChecked())
-        s.set("tools", "command_output_limit", self._command_output_limit_value())
-        s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value())
+        s.set("model", "channels", deepcopy(self._model_channels), save=False)
+        s.set("model", "active_channel_index", self._active_channel_index, save=False)
+        s.set("model", "model_name", self._current_model_text(), save=False)
+        s.set("model", "stream", self.stream_switch.isChecked(), save=False)
+        s.set("tools", "read_enabled", self.read_switch.isChecked(), save=False)
+        s.set("tools", "search_enabled", self.search_switch.isChecked(), save=False)
+        s.set("tools", "capture_mode", self._mode_group_value(self.capture_mode_group), save=False)
+        s.set("tools", "web_search_enabled", self.web_search_switch.isChecked(), save=False)
+        s.set("tools", "clipboard_enabled", self.clipboard_switch.isChecked(), save=False)
+        s.set("integrations", "tavily_api_key", self.tavily_api_key_edit.text(), save=False)
+        s.set("tools", "write_mode", self._mode_group_value(self.write_mode_group), save=False)
+        s.set("tools", "add_mode", self._mode_group_value(self.add_mode_group), save=False)
+        s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group), save=False)
+        s.set("tools", "command_mode", self._mode_group_value(self.command_mode_group), save=False)
+        s.set("tools", "ssh_remote_command_mode", self._mode_group_value(self.ssh_remote_command_mode_group), save=False)
+        s.set("tools", "web_fetch_enabled", self.web_fetch_switch.isChecked(), save=False)
+        s.set("tools", "command_output_limit", self._command_output_limit_value(), save=False)
+        s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value(), save=False)
+        s.save()
 
     def _import_highlight_theme(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -1227,8 +1434,10 @@ class SettingsWindow(QWidget):
         super().closeEvent(event)
 
     def _fetch_models(self):
-        url = self.endpoint_url_edit.text().strip().rstrip("/")
-        key = self.api_key_edit.text().strip()
+        channel = self._active_channel_for_request()
+        url = channel.get("endpoint_url", "").strip().rstrip("/")
+        key = channel.get("api_key", "").strip()
+        endpoint_type = channel.get("endpoint_type", "openai")
         if not url or not key:
             InfoBar.warning("提示", "请先填写端点 URL 和 API Key", parent=self,
                             position=InfoBarPosition.TOP, duration=3000)
@@ -1236,7 +1445,7 @@ class SettingsWindow(QWidget):
         self.fetch_models_btn.setEnabled(False)
 
         def do_fetch():
-            client = LLMClient(url, key, self._current_endpoint_type())
+            client = LLMClient(url, key, endpoint_type)
             return client.fetch_models()
 
         self._fetch_worker = _AsyncWorker(do_fetch, self)
@@ -1271,8 +1480,10 @@ class SettingsWindow(QWidget):
                         position=InfoBarPosition.TOP, duration=5000)
 
     def _test_connection(self):
-        url = self.endpoint_url_edit.text().strip().rstrip("/")
-        key = self.api_key_edit.text().strip()
+        channel = self._active_channel_for_request()
+        url = channel.get("endpoint_url", "").strip().rstrip("/")
+        key = channel.get("api_key", "").strip()
+        endpoint_type = channel.get("endpoint_type", "openai")
         model = self._current_model_text()
         if not url or not key or not model:
             InfoBar.warning("提示", "请先完整填写端点信息", parent=self,
@@ -1281,7 +1492,7 @@ class SettingsWindow(QWidget):
         self.test_btn.setEnabled(False)
 
         def do_test():
-            client = LLMClient(url, key, self._current_endpoint_type())
+            client = LLMClient(url, key, endpoint_type)
             return client.test_connection(model)
 
         self._test_worker = _AsyncWorker(do_test, self)
@@ -1383,6 +1594,17 @@ class SettingsWindow(QWidget):
         except ValueError:
             return 30
         return max(1, value)
+
+    def _tool_result_context_limit_value(self) -> int:
+        text = self.tool_result_context_limit_edit.text().strip()
+        if not text:
+            return 5
+        try:
+            value = int(text)
+        except ValueError:
+            return 5
+        value = max(0, value)
+        return 0 if value >= 1000000 else value
 
     @staticmethod
     def _format_tavily_usage_value(value) -> str:

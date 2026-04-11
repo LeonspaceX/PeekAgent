@@ -3,6 +3,7 @@
 import datetime as dt
 import getpass
 import json
+import os
 import platform
 import subprocess
 
@@ -10,6 +11,17 @@ from PySide6.QtCore import QThread, Signal
 
 from src.config import PROMPT_DIR, RESOURCE_DIR, Settings
 from src.llm_client import LLMClient, StreamWorker
+
+
+def _hidden_powershell_subprocess_kwargs() -> dict:
+    kwargs = {}
+    if os.name == "nt":
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startupinfo
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return kwargs
 
 
 def _build_runtime_time_profile() -> str:
@@ -56,6 +68,7 @@ def _detect_system_profile() -> str:
                 encoding="utf-8",
                 errors="replace",
                 timeout=5,
+                **_hidden_powershell_subprocess_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout.strip())
@@ -86,6 +99,7 @@ def _detect_system_profile() -> str:
                 encoding="utf-8",
                 errors="replace",
                 timeout=3,
+                **_hidden_powershell_subprocess_kwargs(),
             )
             if result.returncode == 0 and result.stdout.strip():
                 powershell_version = result.stdout.strip()
@@ -111,9 +125,17 @@ class ApiClient:
 
     def _ensure_client(self):
         settings = Settings()
-        url = settings.get("model", "endpoint_url", "")
-        key = settings.get("model", "api_key", "")
-        endpoint_type = settings.get("model", "endpoint_type", "openai")
+        channels = settings.get("model", "channels", [])
+        active_index = settings.get("model", "active_channel_index", 0)
+        if not isinstance(channels, list) or not channels:
+            raise ValueError("璇峰厛鍦ㄨ缃腑閰嶇疆绔偣 URL 鍜?API Key")
+        if not isinstance(active_index, int):
+            active_index = 0
+        active_index = max(0, min(active_index, len(channels) - 1))
+        channel = channels[active_index] if isinstance(channels[active_index], dict) else {}
+        url = channel.get("endpoint_url", channel.get("endpoint", ""))
+        key = channel.get("api_key", "")
+        endpoint_type = channel.get("endpoint_type", channel.get("endpoint_format", "openai"))
         if not url or not key:
             raise ValueError("请先在设置中配置端点 URL 和 API Key")
 

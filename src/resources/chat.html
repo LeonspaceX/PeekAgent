@@ -491,13 +491,33 @@ body {
 </style>
 </head>
 <body>
+<div id="history-sentinel" aria-hidden="true"></div>
 <div id="chat-container"></div>
 <script>
 let actionIcons = { edit: '', copy: '', refresh: '', check: '' };
 let chatBridge = null;
+let hasOlderMessages = false;
+let loadingOlderMessages = false;
 
 new QWebChannel(qt.webChannelTransport, function(channel) {
   chatBridge = channel.objects.chatBridge;
+});
+
+const historyObserver = new IntersectionObserver((entries) => {
+  if (!hasOlderMessages || loadingOlderMessages || !chatBridge) {
+    return;
+  }
+  if (entries.some(entry => entry.isIntersecting)) {
+    loadingOlderMessages = true;
+    chatBridge.loadOlderMessages();
+  }
+}, { root: null, threshold: 0 });
+
+window.addEventListener('DOMContentLoaded', () => {
+  const sentinel = document.getElementById('history-sentinel');
+  if (sentinel) {
+    historyObserver.observe(sentinel);
+  }
 });
 
 const md = window.markdownit({
@@ -719,8 +739,7 @@ function attachMessageActions(messageEl, role, index, content) {
   messageEl.appendChild(actions);
 }
 
-function renderMessage(role, content, index) {
-  const container = document.getElementById('chat-container');
+function createMessageElement(role, content, index) {
   const msgDiv = document.createElement('div');
   msgDiv.className = 'message ' + role;
   msgDiv.dataset.index = index;
@@ -730,8 +749,14 @@ function renderMessage(role, content, index) {
   wrapTables(bubble);
   msgDiv.appendChild(bubble);
   attachMessageActions(msgDiv, role, index, content);
-  container.appendChild(msgDiv);
   renderMath(bubble);
+  return msgDiv;
+}
+
+function renderMessage(role, content, index) {
+  const container = document.getElementById('chat-container');
+  const msgDiv = createMessageElement(role, content, index);
+  container.appendChild(msgDiv);
   window.scrollTo(0, document.body.scrollHeight);
   return msgDiv;
 }
@@ -831,6 +856,62 @@ function renderToolMessage(payload) {
   const card = createToolCard(payload);
   container.appendChild(card);
   window.scrollTo(0, document.body.scrollHeight);
+}
+
+function createHistoryNode(item) {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+  if (item.kind === 'tool') {
+    return createToolCard(item.payload || {});
+  }
+  if (item.kind === 'message') {
+    return createMessageElement(item.role, item.content || '', item.index);
+  }
+  return null;
+}
+
+function renderItems(items) {
+  const container = document.getElementById('chat-container');
+  (items || []).forEach(item => {
+    const node = createHistoryNode(item);
+    if (node) {
+      container.appendChild(node);
+    }
+  });
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function prependItems(items, hasMore) {
+  const container = document.getElementById('chat-container');
+  const oldHeight = document.body.scrollHeight;
+  const fragment = document.createDocumentFragment();
+  (items || []).forEach(item => {
+    const node = createHistoryNode(item);
+    if (node) {
+      fragment.appendChild(node);
+    }
+  });
+  container.insertBefore(fragment, container.firstChild);
+  const newHeight = document.body.scrollHeight;
+  window.scrollTo(0, window.scrollY + (newHeight - oldHeight));
+  setHasOlderMessages(hasMore);
+}
+
+function setHasOlderMessages(hasMore) {
+  hasOlderMessages = !!hasMore;
+  loadingOlderMessages = false;
+  const sentinel = document.getElementById('history-sentinel');
+  if (
+    hasOlderMessages &&
+    sentinel &&
+    chatBridge &&
+    sentinel.getBoundingClientRect().top >= 0 &&
+    sentinel.getBoundingClientRect().top <= window.innerHeight
+  ) {
+    loadingOlderMessages = true;
+    chatBridge.loadOlderMessages();
+  }
 }
 
 function updateToolMessage(payload) {
@@ -954,6 +1035,7 @@ function finishStream() {
 
 function clearChat() {
   document.getElementById('chat-container').innerHTML = '';
+  setHasOlderMessages(false);
 }
 
 function setTheme(primaryColor, userColor, aiColor, darkMode) {

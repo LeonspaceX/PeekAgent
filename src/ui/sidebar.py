@@ -1,9 +1,10 @@
 """Sidebar widget for conversation list."""
 
 from PySide6.QtCore import Signal, Qt, QPropertyAnimation, QEasingCurve
+from PySide6.QtGui import QResizeEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QAbstractItemView, QFrame,
+    QAbstractItemView, QFrame, QSizePolicy,
 )
 from qfluentwidgets import (
     PushButton, ToolButton, FluentIcon, LineEdit,
@@ -27,11 +28,14 @@ class SessionItem(QWidget):
 
         self.label = BodyLabel(title, self)
         self.label.setFixedHeight(28)
+        self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.label.setStyleSheet("font-size: 13px; font-weight: bold;")
+        self.label.setToolTip(title)
         layout.addWidget(self.label, 1)
 
         self.name_edit = LineEdit(self)
         self.name_edit.setFixedHeight(28)
+        self.name_edit.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.name_edit.hide()
         self.name_edit.returnPressed.connect(self._finish_rename)
         self.name_edit.editingFinished.connect(self._finish_rename)
@@ -46,6 +50,7 @@ class SessionItem(QWidget):
         self.del_btn.setFixedSize(28, 28)
         self.del_btn.clicked.connect(lambda: self.delete_requested.emit(self.sid))
         layout.addWidget(self.del_btn)
+        self._update_elided_title()
         self.apply_theme()
 
     def apply_theme(self, dark_mode: bool | None = None, selected: bool = False):
@@ -73,8 +78,17 @@ class SessionItem(QWidget):
         self.label.show()
         if new_title and new_title != self._title:
             self._title = new_title
-            self.label.setText(new_title)
+            self.label.setToolTip(new_title)
+            self._update_elided_title()
             self.rename_confirmed.emit(self.sid, new_title)
+
+    def resizeEvent(self, event: QResizeEvent):
+        super().resizeEvent(event)
+        self._update_elided_title()
+
+    def _update_elided_title(self):
+        width = max(0, self.label.width() - 2)
+        self.label.setText(self.label.fontMetrics().elidedText(self._title, Qt.TextElideMode.ElideRight, width))
 
 
 class Sidebar(QFrame):
@@ -104,6 +118,7 @@ class Sidebar(QFrame):
 
         # Session list
         self.list_widget = QListWidget(self)
+        self.list_widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(self.list_widget, 1)
@@ -133,8 +148,18 @@ class Sidebar(QFrame):
                 background: {sidebar_bg};
                 border-right: 1px solid {border};
             }}
-            QListWidget {{ border: none; background: transparent; }}
-            QListWidget::item {{ border-radius: 6px; padding: 2px; }}
+            QListWidget {{
+                border: none;
+                background: transparent;
+                outline: none;
+            }}
+            QListWidget::item {{
+                border: none;
+                outline: none;
+                border-radius: 6px;
+                padding: 2px;
+            }}
+            QListWidget::item:focus {{ border: none; outline: none; }}
             QListWidget::item:selected {{ background: {selected}; }}
             QListWidget::item:hover {{ background: {hover}; }}
         """)

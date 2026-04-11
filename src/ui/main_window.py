@@ -2,6 +2,7 @@
 
 import os
 import base64
+import json
 import shutil
 import mimetypes
 import uuid
@@ -37,7 +38,10 @@ class _BackgroundTaskBridge(QObject):
 
 class MainWindow(QWidget):
     EDGE_SIZE = 8  # pixels for resize grip
+    RIGHT_RESIZE_GUTTER = 4
     WORKER_SHUTDOWN_TIMEOUT_MS = 2000
+    OMITTED_TOOL_RESULT_TEXT = "[调用结果已被省略]"
+    HISTORY_RENDER_BATCH_SIZE = 30
 
     def __init__(self):
         super().__init__()
@@ -49,9 +53,12 @@ class MainWindow(QWidget):
         self._stream_worker = None
         self._tool_worker = None
         self._title_worker = None
+        self._tool_group_queue: list[list[ToolCall]] = []
         self._tool_queue: list[ToolCall] = []
+        self._current_tool_results_message: dict | None = None
         self._pending_tool_call: ToolCall | None = None
         self._pending_tool_id: str | None = None
+        self._render_start_index = 0
         self._consecutive_auto_tool_rounds = 0
         self._tool_flow_stopped = False
         self._drag_pos = None
@@ -125,7 +132,7 @@ class MainWindow(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setContentsMargins(0, 0, self.RIGHT_RESIZE_GUTTER, 0)
         main_layout.setSpacing(0)
 
         # Title bar
@@ -157,6 +164,7 @@ class MainWindow(QWidget):
         self.chat_view.edit_requested.connect(self._edit_message)
         self.chat_view.regenerate_requested.connect(self._regenerate_message)
         self.chat_view.tool_approval_requested.connect(self._handle_tool_approval)
+        self.chat_view.load_older_requested.connect(self._load_older_messages)
         main_layout.addWidget(self.chat_view, 1)
 
         # Input area
@@ -262,7 +270,7 @@ class MainWindow(QWidget):
         self._current_session = data
         self.title_label.setText(data["title"])
         self._render_current_session()
-        self.sidebar.collapse()
+        self._close_sidebar()
 
     def _delete_session(self, sid: str):
         w = MessageBox("删除会话", "确定要删除这个会话吗？此操作不可撤销。", self)
@@ -295,7 +303,9 @@ class MainWindow(QWidget):
     # --- Chat ---
 
     def _reset_tool_flow(self):
+        self._tool_group_queue.clear()
         self._tool_queue.clear()
+        self._current_tool_results_message = None
         self._pending_tool_call = None
         self._pending_tool_id = None
         self._consecutive_auto_tool_rounds = 0
@@ -372,42 +382,124 @@ class MainWindow(QWidget):
 
     _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
+    def _tool_result_context_limit(self) -> int:
+        value = self.settings.get("general", "tool_result_context_limit", 5)
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return 5
+        parsed = max(0, parsed)
+        return 0 if parsed >= 1000000 else parsed
+
+    def _included_tool_context_indexes(self, messages: list[dict]) -> set[int] | None:
+        limit = self._tool_result_context_limit()
+        if limit <= 0:
+            return None
+
+        included: list[int] = []
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if message.get("role") == "tool_results":
+                if not self._completed_tool_results(message):
+                    continue
+            elif message.get("role") == "tool":
+                if message.get("status") not in {"success", "error", "denied"}:
+                    continue
+            else:
+                continue
+            included.append(index)
+            if len(included) >= limit:
+                break
+        return set(included)
+
+    @staticmethod
+    def _completed_tool_results(message: dict) -> list[dict]:
+        return [
+            item
+            for item in message.get("results", [])
+            if isinstance(item, dict) and item.get("status") in {"success", "error", "denied"}
+        ]
+
+    @staticmethod
+    def _tool_results_context_text(results: list[dict]) -> str:
+        payload = {
+            "tool_call_results": [
+                {
+                    "tool": item.get("tool_name", ""),
+                    "status": item.get("status", ""),
+                    "detail": item.get("detail", ""),
+                    "content": item.get("content", ""),
+                    "attachments": [os.path.basename(path) for path in (item.get("attachments") or [])],
+                }
+                for item in results
+            ]
+        }
+        return "工具调用结果：\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _append_api_message(self, result: list, api_role: str, content: str, attachments: list[str]):
+        attachments = attachments or []
+        if not attachments:
+            result.append({"role": api_role, "content": content})
+            return
+        parts = []
+        if content:
+            parts.append({"type": "text", "text": content})
+        for p in attachments:
+            ext = os.path.splitext(p)[1].lower()
+            if ext in self._IMAGE_EXTS:
+                try:
+                    with open(p, "rb") as f:
+                        b64 = base64.b64encode(f.read()).decode("ascii")
+                    mime = mimetypes.guess_type(p)[0] or "image/png"
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"}
+                    })
+                except OSError:
+                    parts.append({"type": "text", "text": f"[附件: {os.path.basename(p)} (读取失败)]"})
+            else:
+                try:
+                    with open(p, "r", encoding="utf-8") as f:
+                        file_text = f.read(50000)
+                    parts.append({"type": "text", "text": f"--- {os.path.basename(p)} ---\n{file_text}"})
+                except (UnicodeDecodeError, OSError):
+                    parts.append({"type": "text", "text": f"[附件: {os.path.basename(p)} (二进制文件)]"})
+        result.append({"role": api_role, "content": parts})
+
     def _build_api_messages(self) -> list:
         """Convert session messages to API format, resolving attachment paths."""
         result = []
-        for m in self._current_session["messages"]:
+        messages = self._current_session["messages"]
+        included_tool_indexes = self._included_tool_context_indexes(messages)
+        for index, m in enumerate(messages):
             role = m.get("role")
-            if role == "tool" and m.get("status") not in {"success", "error", "denied"}:
+            if role == "tool_results":
+                results = self._completed_tool_results(m)
+                if not results:
+                    continue
+                if included_tool_indexes is not None and index not in included_tool_indexes:
+                    self._append_api_message(result, "user", self.OMITTED_TOOL_RESULT_TEXT, [])
+                    continue
+                content = self._tool_results_context_text(results)
+                attachments = [
+                    path
+                    for item in results
+                    for path in (item.get("attachments") or [])
+                ]
+                self._append_api_message(result, "user", content, attachments)
                 continue
-            api_role = "user" if role == "tool" else role
-            attachments = m.get("attachments", [])
-            if not attachments:
-                result.append({"role": api_role, "content": m["content"]})
+
+            if role == "tool":
+                if m.get("status") not in {"success", "error", "denied"}:
+                    continue
+                if included_tool_indexes is not None and index not in included_tool_indexes:
+                    self._append_api_message(result, "user", self.OMITTED_TOOL_RESULT_TEXT, [])
+                    continue
+                content = self._tool_results_context_text([m])
+                self._append_api_message(result, "user", content, m.get("attachments", []))
                 continue
-            parts = []
-            if m["content"]:
-                parts.append({"type": "text", "text": m["content"]})
-            for p in attachments:
-                ext = os.path.splitext(p)[1].lower()
-                if ext in self._IMAGE_EXTS:
-                    try:
-                        with open(p, "rb") as f:
-                            b64 = base64.b64encode(f.read()).decode("ascii")
-                        mime = mimetypes.guess_type(p)[0] or "image/png"
-                        parts.append({
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime};base64,{b64}"}
-                        })
-                    except OSError:
-                        parts.append({"type": "text", "text": f"[附件: {os.path.basename(p)} (读取失败)]"})
-                else:
-                    try:
-                        with open(p, "r", encoding="utf-8") as f:
-                            file_text = f.read(50000)
-                        parts.append({"type": "text", "text": f"--- {os.path.basename(p)} ---\n{file_text}"})
-                    except (UnicodeDecodeError, OSError):
-                        parts.append({"type": "text", "text": f"[附件: {os.path.basename(p)} (二进制文件)]"})
-            result.append({"role": api_role, "content": parts})
+
+            self._append_api_message(result, role, m.get("content", ""), m.get("attachments", []))
         return result
 
     def _message_display_text(self, message: dict) -> str:
@@ -425,18 +517,48 @@ class MainWindow(QWidget):
         self.chat_view.clear_chat()
         if not self._current_session:
             return
-        for index, message in enumerate(self._current_session["messages"]):
+        messages = self._current_session["messages"]
+        self._render_start_index = max(0, len(messages) - self.HISTORY_RENDER_BATCH_SIZE)
+        self.chat_view.render_items(self._history_render_items(self._render_start_index, len(messages)))
+        self.chat_view.set_has_older_messages(self._render_start_index > 0)
+
+    def _history_render_items(self, start: int, end: int) -> list[dict]:
+        if not self._current_session:
+            return []
+        messages = self._current_session["messages"]
+        items: list[dict] = []
+        for index in range(max(0, start), min(end, len(messages))):
+            message = messages[index]
+            if message.get("role") == "tool_results":
+                for result in message.get("results", []):
+                    if isinstance(result, dict):
+                        items.append({"kind": "tool", "payload": self._tool_payload(result)})
+                continue
             if message.get("role") == "tool":
-                self.chat_view.add_tool_message(self._tool_payload(message))
+                items.append({"kind": "tool", "payload": self._tool_payload(message)})
                 continue
             display_text = self._message_display_text(message)
             if message.get("role") == "assistant" and not display_text.strip():
                 continue
-            self.chat_view.add_message(
-                message["role"],
-                display_text,
-                index,
-            )
+            items.append({
+                "kind": "message",
+                "role": message["role"],
+                "content": display_text,
+                "index": index,
+            })
+        return items
+
+    def _load_older_messages(self):
+        if not self._current_session or self._render_start_index <= 0:
+            self.chat_view.set_has_older_messages(False)
+            return
+        end = self._render_start_index
+        start = max(0, end - self.HISTORY_RENDER_BATCH_SIZE)
+        self._render_start_index = start
+        self.chat_view.prepend_items(
+            self._history_render_items(start, end),
+            has_more=self._render_start_index > 0,
+        )
 
     @staticmethod
     def _tool_payload(message: dict) -> dict:
@@ -466,13 +588,13 @@ class MainWindow(QWidget):
     def _on_stream_done(self, full_text: str):
         self.chat_view.finish_stream()
         self._stream_worker = None
-        display_text, tool_calls = ToolParser.parse_response(full_text)
+        display_text, tool_call_groups = ToolParser.parse_response(full_text)
         assistant_message = {"role": "assistant", "content": full_text, "display_content": display_text}
         self._current_session["messages"].append(assistant_message)
         self.chat_mgr.save_session(self._current_session)
         completed_background_tasks = self._flush_pending_background_results(trigger_follow_up=False)
-        if tool_calls:
-            if self._tool_round_has_manual_gate(tool_calls):
+        if tool_call_groups:
+            if self._tool_round_has_manual_gate(tool_call_groups):
                 self._consecutive_auto_tool_rounds = 0
             else:
                 self._consecutive_auto_tool_rounds += 1
@@ -489,7 +611,7 @@ class MainWindow(QWidget):
                     self._finish_task_timer(False)
                     self.input_area.set_streaming(False)
                     return
-            self._start_tool_sequence(tool_calls)
+            self._start_tool_sequence(tool_call_groups)
             return
 
         if completed_background_tasks:
@@ -514,17 +636,35 @@ class MainWindow(QWidget):
             return 8
         return max(1, parsed)
 
-    def _tool_round_has_manual_gate(self, tool_calls: list[ToolCall]) -> bool:
-        return any(self.tool_runtime.get_mode(call.tool_name) == "manual" for call in tool_calls)
+    def _tool_round_has_manual_gate(self, tool_call_groups: list[list[ToolCall]]) -> bool:
+        return any(
+            self.tool_runtime.get_mode(call.tool_name) == "manual"
+            for group in tool_call_groups
+            for call in group
+        )
 
-    def _start_tool_sequence(self, tool_calls: list[ToolCall]):
-        self._tool_queue = list(tool_calls)
+    def _start_tool_sequence(self, tool_call_groups: list[list[ToolCall]]):
+        self._tool_group_queue = [list(group) for group in tool_call_groups if group]
+        self._tool_queue = []
+        self._current_tool_results_message = None
+        self._start_next_tool_group()
+
+    def _start_next_tool_group(self):
+        if not self._tool_group_queue:
+            self._process_next_tool_call()
+            return
+        self._tool_queue = self._tool_group_queue.pop(0)
+        self._current_tool_results_message = self._append_tool_results_group()
         self._process_next_tool_call()
 
     def _process_next_tool_call(self):
         if self._pending_tool_call is not None or self._tool_worker is not None:
             return
         if not self._tool_queue:
+            self._current_tool_results_message = None
+            if self._tool_group_queue:
+                self._start_next_tool_group()
+                return
             if self._tool_flow_stopped:
                 self._tool_flow_stopped = False
                 return
@@ -540,7 +680,7 @@ class MainWindow(QWidget):
         call = self._tool_queue.pop(0)
         mode = self.tool_runtime.get_mode(call.tool_name)
         if mode == "off":
-            self._append_tool_message(
+            self._append_tool_result(
                 tool_id=uuid.uuid4().hex[:12],
                 tool_name=call.tool_name,
                 title=call.display_name,
@@ -553,7 +693,7 @@ class MainWindow(QWidget):
 
         tool_id = uuid.uuid4().hex[:12]
         if mode == "manual":
-            self._append_tool_message(
+            self._append_tool_result(
                 tool_id=tool_id,
                 tool_name=call.tool_name,
                 title=call.display_name,
@@ -572,7 +712,7 @@ class MainWindow(QWidget):
     def _run_tool_call(self, call: ToolCall, tool_id: str):
         existing = self._find_message_by_tool_id(tool_id)
         if existing is None:
-            self._append_tool_message(
+            self._append_tool_result(
                 tool_id=tool_id,
                 tool_name=call.tool_name,
                 title=call.display_name,
@@ -608,7 +748,7 @@ class MainWindow(QWidget):
     def _on_tool_finished(self, tool_id: str, result):
         message = self._find_message_by_tool_id(tool_id)
         if message is None:
-            self._append_tool_message(
+            self._append_tool_result(
                 tool_id=tool_id,
                 tool_name=result.tool_name,
                 title=ToolCall(tool_name=result.tool_name, raw_body="").display_name,
@@ -686,6 +826,48 @@ class MainWindow(QWidget):
         self.chat_view.add_tool_message(self._tool_payload(message))
         return message
 
+    def _append_tool_results_group(self) -> dict:
+        message = {
+            "role": "tool_results",
+            "results": [],
+        }
+        self._current_session["messages"].append(message)
+        self.chat_mgr.save_session(self._current_session)
+        return message
+
+    def _append_tool_result(
+        self,
+        *,
+        tool_id: str,
+        tool_name: str,
+        title: str,
+        detail: str,
+        status: str,
+        content: str,
+        attachments: list[str] | None = None,
+        requires_approval: bool = False,
+        expanded: bool = False,
+    ) -> dict:
+        group = self._current_tool_results_message
+        if group is None or group.get("role") != "tool_results":
+            group = self._append_tool_results_group()
+            self._current_tool_results_message = group
+        result = {
+            "tool_id": tool_id,
+            "tool_name": tool_name,
+            "title": title,
+            "detail": detail,
+            "status": status,
+            "content": content,
+            "requires_approval": requires_approval,
+            "attachments": list(attachments or []),
+            "expanded": expanded,
+        }
+        group.setdefault("results", []).append(result)
+        self.chat_mgr.save_session(self._current_session)
+        self.chat_view.add_tool_message(self._tool_payload(result))
+        return result
+
     def _flush_pending_background_results(self, trigger_follow_up: bool = False) -> bool:
         if not self._current_session:
             return False
@@ -704,6 +886,7 @@ class MainWindow(QWidget):
             and self._tool_worker is None
             and self._pending_tool_call is None
             and not self._tool_queue
+            and not self._tool_group_queue
         )
 
     def _on_background_task_completed(self):
@@ -766,6 +949,10 @@ class MainWindow(QWidget):
         for message in self._current_session["messages"]:
             if message.get("role") == "tool" and message.get("tool_id") == tool_id:
                 return message
+            if message.get("role") == "tool_results":
+                for result in message.get("results", []):
+                    if isinstance(result, dict) and result.get("tool_id") == tool_id:
+                        return result
         return None
 
     def _tool_request_detail(self, call: ToolCall) -> str:
@@ -935,7 +1122,9 @@ class MainWindow(QWidget):
                 )
         if self._tool_worker is not None:
             self._tool_flow_stopped = True
+        self._tool_group_queue.clear()
         self._tool_queue.clear()
+        self._current_tool_results_message = None
         self._pending_tool_call = None
         self._pending_tool_id = None
         self._finish_task_timer(False)
@@ -959,7 +1148,7 @@ class MainWindow(QWidget):
         QApplication.clipboard().setText(self._message_display_text(messages[index]))
 
     def _edit_message(self, index: int, new_text: str):
-        if self._stream_worker or self._pending_tool_call or self._tool_queue:
+        if self._stream_worker or self._pending_tool_call or self._tool_queue or self._tool_group_queue:
             self._show_error("请等待当前回复完成后再修改消息")
             return
         if not self._current_session:
@@ -990,7 +1179,7 @@ class MainWindow(QWidget):
             self.input_area.set_streaming(False)
 
     def _regenerate_message(self, index: int):
-        if self._stream_worker or self._pending_tool_call or self._tool_queue:
+        if self._stream_worker or self._pending_tool_call or self._tool_queue or self._tool_group_queue:
             self._show_error("请等待当前回复完成后再重新生成")
             return
         if not self._current_session:
@@ -1053,11 +1242,12 @@ class MainWindow(QWidget):
 
     def _layout_grips(self):
         E = self.EDGE_SIZE
+        right_gutter = self.RIGHT_RESIZE_GUTTER
         w, h = self.width(), self.height()
         self._grip_top.setGeometry(E, 0, w - 2 * E, E)
         self._grip_bottom.setGeometry(E, h - E, w - 2 * E, E)
         self._grip_left.setGeometry(0, E, E, h - 2 * E)
-        self._grip_right.setGeometry(w - E, E, E, h - 2 * E)
+        self._grip_right.setGeometry(w - right_gutter, E, right_gutter, h - 2 * E)
         self._grip_tl.setGeometry(0, 0, E, E)
         self._grip_tr.setGeometry(w - E, 0, E, E)
         self._grip_bl.setGeometry(0, h - E, E, E)
@@ -1140,7 +1330,9 @@ class MainWindow(QWidget):
 
         self._title_typing_timer.stop()
         self._save_geo_timer.stop()
+        self._tool_group_queue.clear()
         self._tool_queue.clear()
+        self._current_tool_results_message = None
         self._pending_tool_call = None
         self._pending_tool_id = None
         self._tool_flow_stopped = True
