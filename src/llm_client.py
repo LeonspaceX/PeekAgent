@@ -117,6 +117,12 @@ class LLMClient:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         })
 
+    def close(self):
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
     def _messages_path(self) -> str:
         if self.endpoint_type == "anthropic":
             return "/messages"
@@ -401,6 +407,7 @@ class StreamWorker(QThread):
                 self.error_occurred.emit(str(e))
         finally:
             self._response = None
+            self.client.close()
 
     def _run_openai_stream(self, response) -> str:
         full_text = ""
@@ -485,4 +492,8 @@ class StreamWorker(QThread):
     def cancel(self):
         self._cancelled = True
         if self._response is not None:
-            self._response.close()
+            try:
+                self._response.close()
+            except Exception:
+                pass
+        self.client.close()

@@ -496,20 +496,68 @@ body {
 <script>
 let actionIcons = { edit: '', copy: '', refresh: '', check: '' };
 let chatBridge = null;
+let bridgeInitializing = false;
 let hasOlderMessages = false;
 let loadingOlderMessages = false;
 
-new QWebChannel(qt.webChannelTransport, function(channel) {
-  chatBridge = channel.objects.chatBridge;
-});
+function initBridge() {
+  if (bridgeInitializing) {
+    return false;
+  }
+  if (!window.qt || !qt.webChannelTransport || typeof QWebChannel !== 'function') {
+    window.__peekagentBridgeReady = false;
+    console.warn('QWebChannel transport is unavailable.');
+    return false;
+  }
+  bridgeInitializing = true;
+  try {
+    new QWebChannel(qt.webChannelTransport, function(channel) {
+      bridgeInitializing = false;
+      chatBridge = channel.objects.chatBridge || null;
+      window.__peekagentBridgeReady = !!chatBridge;
+      if (!chatBridge) {
+        console.warn('chatBridge object was not registered.');
+      }
+    });
+    return true;
+  } catch (error) {
+    bridgeInitializing = false;
+    chatBridge = null;
+    window.__peekagentBridgeReady = false;
+    console.error('Failed to initialize chatBridge.', error);
+    return false;
+  }
+}
+
+function callBridge(method, ...args) {
+  if (!chatBridge || typeof chatBridge[method] !== 'function') {
+    console.warn(`chatBridge unavailable for ${method}.`);
+    initBridge();
+    return false;
+  }
+  try {
+    chatBridge[method](...args);
+    return true;
+  } catch (error) {
+    console.error(`chatBridge call failed: ${method}`, error);
+    chatBridge = null;
+    window.__peekagentBridgeReady = false;
+    initBridge();
+    return false;
+  }
+}
+
+initBridge();
 
 const historyObserver = new IntersectionObserver((entries) => {
-  if (!hasOlderMessages || loadingOlderMessages || !chatBridge) {
+  if (!hasOlderMessages || loadingOlderMessages) {
     return;
   }
   if (entries.some(entry => entry.isIntersecting)) {
     loadingOlderMessages = true;
-    chatBridge.loadOlderMessages();
+    if (!callBridge('loadOlderMessages')) {
+      loadingOlderMessages = false;
+    }
   }
 }, { root: null, threshold: 0 });
 
@@ -693,9 +741,7 @@ function createEditPanel(index, content) {
   confirm.type = 'button';
   confirm.textContent = '确定';
   confirm.addEventListener('click', () => {
-    if (chatBridge) {
-      chatBridge.editMessage(index, input.value);
-    }
+    callBridge('editMessage', index, input.value);
   });
   actions.appendChild(confirm);
 
@@ -715,9 +761,7 @@ function attachMessageActions(messageEl, role, index, content) {
       }
     }));
     actions.appendChild(createActionButton('copy', '复制', (event) => {
-      if (chatBridge) {
-        chatBridge.copyMessage(index);
-      }
+      callBridge('copyMessage', index);
       flashCopiedState(event.currentTarget);
     }));
     messageEl.appendChild(actions);
@@ -726,14 +770,10 @@ function attachMessageActions(messageEl, role, index, content) {
   }
 
   actions.appendChild(createActionButton('refresh', '重新生成', () => {
-    if (chatBridge) {
-      chatBridge.regenerateMessage(index);
-    }
+    callBridge('regenerateMessage', index);
   }));
   actions.appendChild(createActionButton('copy', '复制', (event) => {
-    if (chatBridge) {
-      chatBridge.copyMessage(index);
-    }
+    callBridge('copyMessage', index);
     flashCopiedState(event.currentTarget);
   }));
   messageEl.appendChild(actions);
@@ -825,9 +865,7 @@ function createToolCard(payload) {
     deny.textContent = '拒绝';
     deny.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (chatBridge) {
-        chatBridge.denyTool(payload.id);
-      }
+      callBridge('denyTool', payload.id);
     });
     approval.appendChild(deny);
 
@@ -837,9 +875,7 @@ function createToolCard(payload) {
     approve.textContent = '执行';
     approve.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (chatBridge) {
-        chatBridge.approveTool(payload.id);
-      }
+      callBridge('approveTool', payload.id);
     });
     approval.appendChild(approve);
 
@@ -905,12 +941,13 @@ function setHasOlderMessages(hasMore) {
   if (
     hasOlderMessages &&
     sentinel &&
-    chatBridge &&
     sentinel.getBoundingClientRect().top >= 0 &&
     sentinel.getBoundingClientRect().top <= window.innerHeight
   ) {
     loadingOlderMessages = true;
-    chatBridge.loadOlderMessages();
+    if (!callBridge('loadOlderMessages')) {
+      loadingOlderMessages = false;
+    }
   }
 }
 

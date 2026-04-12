@@ -51,6 +51,7 @@ class MainWindow(QWidget):
         self.tool_runtime = ToolRuntime()
         self._current_session = None
         self._stream_worker = None
+        self._pending_assistant_reply = False
         self._tool_worker = None
         self._title_worker = None
         self._tool_group_queue: list[list[ToolCall]] = []
@@ -341,6 +342,9 @@ class MainWindow(QWidget):
         )
 
     def _on_send(self, text: str, attachments: list = None):
+        if self._stream_worker is not None and self._stream_worker.isRunning():
+            self._show_error("当前回复仍在停止中，请稍后再发送")
+            return
         if not self._current_session:
             self._new_session()
         self._reset_tool_flow()
@@ -573,6 +577,9 @@ class MainWindow(QWidget):
         }
 
     def _request_assistant_reply(self):
+        if self._stream_worker is not None and self._stream_worker.isRunning():
+            self._pending_assistant_reply = True
+            return
         if self._flush_pending_background_results(trigger_follow_up=False):
             self.chat_mgr.save_session(self._current_session)
         messages = self._build_api_messages()
@@ -583,11 +590,11 @@ class MainWindow(QWidget):
         worker.token_received.connect(self.chat_view.append_token)
         worker.stream_finished.connect(self._on_stream_done)
         worker.error_occurred.connect(self._on_stream_error)
+        worker.finished.connect(lambda w=worker: self._on_stream_worker_finished(w))
         worker.start()
 
     def _on_stream_done(self, full_text: str):
         self.chat_view.finish_stream()
-        self._stream_worker = None
         display_text, tool_call_groups = ToolParser.parse_response(full_text)
         assistant_message = {"role": "assistant", "content": full_text, "display_content": display_text}
         self._current_session["messages"].append(assistant_message)
@@ -1098,7 +1105,20 @@ class MainWindow(QWidget):
         self._finish_task_timer(False)
         self._show_error(error)
         self.input_area.set_streaming(False)
-        self._stream_worker = None
+
+    def _on_stream_worker_finished(self, worker):
+        self.api_client.clear_worker(worker)
+        if self._stream_worker is worker:
+            self._stream_worker = None
+        worker.deleteLater()
+        if self._pending_assistant_reply and not self._shutdown_done:
+            self._pending_assistant_reply = False
+            try:
+                self._request_assistant_reply()
+            except Exception as e:
+                self._finish_task_timer(False)
+                self._show_error(str(e))
+                self.input_area.set_streaming(False)
 
     def _on_stop(self):
         """User clicked stop — cancel the stream immediately."""
@@ -1108,7 +1128,7 @@ class MainWindow(QWidget):
             self.chat_view.finish_stream()
             self._finish_task_timer(False)
             self.input_area.set_streaming(False)
-            self._stream_worker = None
+            self._pending_assistant_reply = False
             self._reset_tool_flow()
             return
         if self._pending_tool_call and self._pending_tool_id:
@@ -1336,6 +1356,7 @@ class MainWindow(QWidget):
         self._pending_tool_call = None
         self._pending_tool_id = None
         self._tool_flow_stopped = True
+        self._pending_assistant_reply = False
         self._finish_task_timer(False)
         self.tool_runtime.background_tasks.set_completion_callback(None)
 
@@ -1345,16 +1366,24 @@ class MainWindow(QWidget):
             pass
 
         stream_worker = self._stream_worker
-        self._stream_worker = None
         if stream_worker is not None:
             try:
                 stream_worker.cancel()
             except Exception:
                 pass
+            finished = False
             try:
-                stream_worker.wait(self.WORKER_SHUTDOWN_TIMEOUT_MS)
+                finished = stream_worker.wait(self.WORKER_SHUTDOWN_TIMEOUT_MS)
             except Exception:
                 pass
+            if finished:
+                self.api_client.clear_worker(stream_worker)
+                if self._stream_worker is stream_worker:
+                    self._stream_worker = None
+                try:
+                    stream_worker.deleteLater()
+                except Exception:
+                    pass
 
         tool_worker = self._tool_worker
         self._tool_worker = None

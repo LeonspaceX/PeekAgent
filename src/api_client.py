@@ -176,8 +176,9 @@ class ApiClient:
         if not model:
             raise ValueError("请先在设置中选择模型")
 
+        stream_client = LLMClient(self._last_url, self._last_key, self._last_endpoint_type)
         worker = StreamWorker(
-            self._client,
+            stream_client,
             model=model,
             messages=messages,
             system_prompt=self._build_system_prompt(),
@@ -212,6 +213,10 @@ class ApiClient:
     def cancel(self):
         if self._current_worker:
             self._current_worker.cancel()
+
+    def clear_worker(self, worker: StreamWorker):
+        if self._current_worker is worker:
+            self._current_worker = None
 
 
 class TitleWorker(QThread):

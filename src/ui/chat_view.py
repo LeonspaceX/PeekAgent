@@ -1,9 +1,10 @@
 """Chat view widget using QWebEngineView for Markdown/LaTeX/code rendering."""
 
 import json
+import logging
 from pathlib import Path
 
-from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QPoint, QUrl, Qt, Signal, Slot
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, QObject, QPoint, QTimer, QUrl, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -52,6 +53,16 @@ class _ChatPage(QWebEnginePage):
             return False
         return super().acceptNavigationRequest(url, nav_type, is_main_frame)
 
+    def javaScriptConsoleMessage(self, level, message, line_number, source_id):
+        logging.getLogger(__name__).warning(
+            "ChatView JS console [%s] %s:%s %s",
+            level,
+            source_id,
+            line_number,
+            message,
+        )
+        super().javaScriptConsoleMessage(level, message, line_number, source_id)
+
 
 class ChatView(QWebEngineView):
     copy_requested = Signal(int)
@@ -64,8 +75,12 @@ class ChatView(QWebEngineView):
         super().__init__(parent)
         self._loaded = False
         self._pending_js: list[str] = []
+        self._stream_token_buffer: list[str] = []
         self._dark_mode = isDarkTheme()
         self.setPage(_ChatPage(self))
+        self._stream_flush_timer = QTimer(self)
+        self._stream_flush_timer.setInterval(40)
+        self._stream_flush_timer.timeout.connect(self._flush_stream_tokens)
         self._channel = QWebChannel(self.page())
         self._bridge = _ChatBridge(self)
         self._channel.registerObject("chatBridge", self._bridge)
@@ -141,6 +156,14 @@ class ChatView(QWebEngineView):
         else:
             self._pending_js.append(js)
 
+    def _flush_stream_tokens(self):
+        if not self._stream_token_buffer:
+            self._stream_flush_timer.stop()
+            return
+        token = "".join(self._stream_token_buffer)
+        self._stream_token_buffer.clear()
+        self._run_js(f"appendToken({self._to_js_arg(token)});")
+
     def add_message(self, role: str, content: str, index: int):
         self._run_js(
             f"renderMessage({self._to_js_arg(role)}, {self._to_js_arg(content)}, {index});"
@@ -162,15 +185,24 @@ class ChatView(QWebEngineView):
         self._run_js(f"setHasOlderMessages({json.dumps(bool(has_more))});")
 
     def start_stream(self, index: int):
+        self._stream_flush_timer.stop()
+        self._stream_token_buffer.clear()
         self._run_js(f"startStream({index});")
 
     def append_token(self, token: str):
-        self._run_js(f"appendToken({self._to_js_arg(token)});")
+        if not token:
+            return
+        self._stream_token_buffer.append(token)
+        if not self._stream_flush_timer.isActive():
+            self._stream_flush_timer.start()
 
     def finish_stream(self):
+        self._flush_stream_tokens()
         self._run_js("finishStream();")
 
     def clear_chat(self):
+        self._stream_flush_timer.stop()
+        self._stream_token_buffer.clear()
         self._run_js("clearChat();")
 
     def set_theme(self, primary_color: str, user_color: str, ai_color: str, dark_mode: bool = False):
