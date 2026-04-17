@@ -1,3 +1,11 @@
+## [0.2.0]
+
+### 功能
+
+- 增加 Lite Toolcall 服务器，可通过 WebSocket 向外提供 PeekAgent 工具调用能力
+- 设置页新增“高级”页面，支持启用 Lite Toolcall 服务器、配置连接方式、地址、端口和 Token
+- 增加启动参数 `--lite_toolcall`，支持仅启动 Lite Toolcall 服务和托盘图标
+
 ## [0.1.2]
 
 ### 改进

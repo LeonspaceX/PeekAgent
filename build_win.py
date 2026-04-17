@@ -62,7 +62,6 @@ QT_MODULE_EXCLUDES = [
     "PySide6.QtUiTools",
     "PySide6.QtVirtualKeyboard",
     "PySide6.QtWebEngineQuick",
-    "PySide6.QtWebSockets",
     "PySide6.QtWebView",
     "matplotlib",
 ]
@@ -99,6 +98,7 @@ def _build_args() -> list[str]:
         "--hidden-import=PySide6.QtWebEngineCore",
         "--hidden-import=PySide6.QtWebEngineWidgets",
         "--hidden-import=PySide6.QtWebChannel",
+        "--hidden-import=PySide6.QtWebSockets",
     ]
     for module_name in QT_MODULE_EXCLUDES:
         args.append(f"--exclude-module={module_name}")

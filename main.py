@@ -63,10 +63,8 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from qfluentwidgets import FluentTranslator, Theme, isDarkTheme, setTheme, setThemeColor
 
 from src.config import Settings
+from src.lite_toolcall_server import LiteToolcallConfig, LiteToolcallServer
 from src.startup_manager import maybe_handle_startup_helper
-from src.ui.main_window import MainWindow
-from src.ui.settings_window import SettingsWindow
-from src.ui.update_window import UpdateCompleteDialog
 
 
 def _extract_update_finish_arg(argv: list[str]) -> tuple[str | None, list[str]]:
@@ -91,6 +89,17 @@ def _extract_no_open_window_arg(argv: list[str]) -> tuple[bool, list[str]]:
     return no_open_window, filtered
 
 
+def _extract_lite_toolcall_arg(argv: list[str]) -> tuple[bool, list[str]]:
+    lite_toolcall = False
+    filtered = [argv[0]]
+    for item in argv[1:]:
+        if item == "--lite_toolcall":
+            lite_toolcall = True
+            continue
+        filtered.append(item)
+    return lite_toolcall, filtered
+
+
 class _HotkeyBridge(QObject):
     activated = Signal()
 
@@ -111,8 +120,12 @@ class PeekAgentApp:
             self.app.setWindowIcon(QIcon(str(ICON_PATH)))
 
         self.settings = Settings()
+        from src.ui.main_window import MainWindow
+
         self.main_window = MainWindow()
         self.settings_window = None
+        self.lite_toolcall_server = LiteToolcallServer(self.app)
+        self.lite_toolcall_server.statusChanged.connect(self._show_lite_toolcall_status)
         self._hotkey_handle = None
         self._registered_hotkey = None
         self._shutdown_lock = threading.Lock()
@@ -126,6 +139,7 @@ class PeekAgentApp:
         self.main_window.set_notification_tray(self.tray)
         self._setup_hotkey()
         self._apply_theme()
+        self._apply_lite_toolcall_settings()
 
         if not self._no_open_window:
             self._show_and_activate_window(self.main_window)
@@ -150,6 +164,24 @@ class PeekAgentApp:
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _show_lite_toolcall_status(self, title: str, message: str):
+        if not hasattr(self, "tray"):
+            return
+        if title not in {"Lite Toolcall 已启动", "Lite Toolcall 认证成功"}:
+            return
+        self.tray.showMessage(
+            title,
+            message,
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
+
+    def _apply_lite_toolcall_settings(self):
+        if self._shutting_down:
+            return
+        config = LiteToolcallConfig.from_settings(self.settings)
+        self.lite_toolcall_server.restart_if_changed(config)
 
     def _setup_hotkey(self):
         hotkey = (self.settings.get("general", "hotkey", "alt+z") or "").strip()
@@ -216,9 +248,12 @@ class PeekAgentApp:
         if self._shutting_down:
             return
         if self.settings_window is None or not self.settings_window.isVisible():
+            from src.ui.settings_window import SettingsWindow
+
             self.settings_window = SettingsWindow()
             self.settings_window.settings_saved.connect(self._setup_hotkey)
             self.settings_window.settings_saved.connect(self._apply_theme)
+            self.settings_window.settings_saved.connect(self._apply_lite_toolcall_settings)
             self.settings_window.always_on_top_changed.connect(self.main_window.set_always_on_top)
             self.settings_window.update_apply_requested.connect(self._launch_update_and_quit)
             self.settings_window.reset_window_requested.connect(
@@ -275,6 +310,12 @@ class PeekAgentApp:
                 except Exception:
                     pass
 
+            if self.lite_toolcall_server is not None:
+                try:
+                    self.lite_toolcall_server.stop()
+                except Exception:
+                    pass
+
             if hasattr(self, "tray"):
                 try:
                     self.tray.hide()
@@ -309,8 +350,73 @@ class PeekAgentApp:
         self._graceful_quit()
 
     def _show_update_complete_dialog(self):
+        from src.ui.update_window import UpdateCompleteDialog
+
         dialog = UpdateCompleteDialog(self._update_finish_version or "", self.main_window)
         dialog.exec()
+
+    def _quit(self):
+        self._graceful_quit()
+
+    def run(self) -> int:
+        return self.app.exec()
+
+
+class LiteToolcallTrayApp:
+    def __init__(self, argv: list[str]):
+        self.app = QApplication(argv)
+        self.app.setQuitOnLastWindowClosed(False)
+        self.settings = Settings()
+        self._shutdown_lock = threading.Lock()
+        self._shutting_down = False
+
+        if ICON_PATH.exists():
+            self.app.setWindowIcon(QIcon(str(ICON_PATH)))
+
+        self._setup_tray()
+        self.server = LiteToolcallServer(self.app)
+        self.server.statusChanged.connect(self._show_status)
+        config = LiteToolcallConfig.from_settings(self.settings)
+        self.server.start(
+            LiteToolcallConfig(
+                enabled=True,
+                connection_mode=config.connection_mode,
+                host=config.host,
+                port=config.port,
+                token=config.token,
+            )
+        )
+
+    def _setup_tray(self):
+        icon = QIcon(str(ICON_PATH)) if ICON_PATH.exists() else QIcon()
+        self.tray = QSystemTrayIcon(icon)
+        self.tray.setToolTip("PeekAgent Lite Toolcall")
+        self.tray_menu = QMenu()
+        quit_action = QAction("退出", self.tray_menu, triggered=self._quit)
+        self.tray_menu.addAction(quit_action)
+        self.tray.setContextMenu(self.tray_menu)
+        self.tray.show()
+
+    def _show_status(self, title: str, message: str):
+        if title not in {"Lite Toolcall 已启动", "Lite Toolcall 认证成功"}:
+            return
+        self.tray.showMessage(
+            title,
+            message,
+            QSystemTrayIcon.MessageIcon.Information,
+            5000,
+        )
+
+    def _graceful_quit(self):
+        with self._shutdown_lock:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+        try:
+            self.server.stop()
+            self.tray.hide()
+        finally:
+            self.app.quit()
 
     def _quit(self):
         self._graceful_quit()
@@ -322,14 +428,18 @@ class PeekAgentApp:
 if __name__ == "__main__":
     update_finish_version, qt_argv = _extract_update_finish_arg(sys.argv)
     no_open_window, qt_argv = _extract_no_open_window_arg(qt_argv)
+    lite_toolcall, qt_argv = _extract_lite_toolcall_arg(qt_argv)
     helper_exit_code = maybe_handle_startup_helper(qt_argv[1:])
     if helper_exit_code is not None:
         sys.exit(helper_exit_code)
-    app = PeekAgentApp(
-        qt_argv,
-        update_finish_version=update_finish_version,
-        no_open_window=no_open_window,
-    )
+    if lite_toolcall:
+        app = LiteToolcallTrayApp(qt_argv)
+    else:
+        app = PeekAgentApp(
+            qt_argv,
+            update_finish_version=update_finish_version,
+            no_open_window=no_open_window,
+        )
     exit_code = 0
     try:
         exit_code = app.run()

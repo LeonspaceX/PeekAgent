@@ -93,6 +93,13 @@ DEFAULT_SETTINGS = {
     "integrations": {
         "tavily_api_key": "",
     },
+    "lite_toolcall": {
+        "enabled": False,
+        "connection_mode": "forward",
+        "host": "127.0.0.1",
+        "port": 8765,
+        "token": "",
+    },
     "window": {
         "width": 420,
         "height": 620,

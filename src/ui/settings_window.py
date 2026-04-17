@@ -4,6 +4,8 @@ import ctypes
 import json
 import math
 import os
+import secrets
+import string
 import requests
 from copy import deepcopy
 from pathlib import Path
@@ -275,7 +277,7 @@ class SettingsWindow(QWidget):
         # Left nav
         self.nav_list = ListWidget(self)
         self.nav_list.setFixedWidth(140)
-        for name in ["通用", "外观", "模型", "Tavily", "工具", "SSH 服务器", "提示词", "关于"]:
+        for name in ["通用", "外观", "模型", "Tavily", "工具", "SSH 服务器", "提示词", "高级", "关于"]:
             self.nav_list.addItem(name)
         self.nav_list.currentRowChanged.connect(self._switch_page)
         layout.addWidget(self.nav_list)
@@ -289,6 +291,7 @@ class SettingsWindow(QWidget):
         self.stack.addWidget(self._wrap_scroll(self._build_tools_page()))
         self.stack.addWidget(self._wrap_scroll(self._build_ssh_page()))
         self.stack.addWidget(self._build_prompt_page())
+        self.stack.addWidget(self._build_advanced_page())
         self.stack.addWidget(self._build_about_page())
         layout.addWidget(self.stack, 1)
 
@@ -296,7 +299,7 @@ class SettingsWindow(QWidget):
 
     def _switch_page(self, index: int):
         self.stack.setCurrentIndex(index)
-        if index == 7:
+        if index == 8:
             self._maybe_check_update()
 
     def _wrap_scroll(self, page: QWidget) -> SmoothScrollArea:
@@ -1068,6 +1071,82 @@ class SettingsWindow(QWidget):
         InfoBar.success("已保存", "SYSTEM.md 和 MEMORY.md 已更新", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
 
+    def _build_advanced_page(self) -> QWidget:
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        layout.addWidget(SubtitleLabel("高级设置"))
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(12)
+
+        self.lite_toolcall_enabled_switch = SwitchButton(self)
+        form.addRow("启动 Lite Toolcall 服务器:", self.lite_toolcall_enabled_switch)
+        layout.addLayout(form)
+
+        self.lite_toolcall_options_widget = QWidget(self)
+        options_form = QFormLayout(self.lite_toolcall_options_widget)
+        options_form.setContentsMargins(0, 0, 0, 0)
+        options_form.setSpacing(12)
+
+        self.lite_toolcall_mode_combo = ComboBox(self)
+        self.lite_toolcall_mode_combo.addItems(["正向", "反向"])
+        options_form.addRow("连接方式:", self.lite_toolcall_mode_combo)
+
+        self.lite_toolcall_host_edit = LineEdit(self)
+        self.lite_toolcall_host_edit.setPlaceholderText("127.0.0.1")
+        options_form.addRow("IP:", self.lite_toolcall_host_edit)
+
+        self.lite_toolcall_port_edit = LineEdit(self)
+        self.lite_toolcall_port_edit.setPlaceholderText("8765")
+        self.lite_toolcall_port_edit.setValidator(QIntValidator(1, 65535, self))
+        options_form.addRow("端口:", self.lite_toolcall_port_edit)
+
+        token_row_widget = QWidget(self)
+        token_row = QHBoxLayout(token_row_widget)
+        token_row.setContentsMargins(0, 0, 0, 0)
+        token_row.setSpacing(8)
+        self.lite_toolcall_token_edit = LineEdit(self)
+        self.lite_toolcall_token_edit.setPlaceholderText("Lite Toolcall 认证 Token")
+        token_row.addWidget(self.lite_toolcall_token_edit, 1)
+        self.lite_toolcall_token_generate_btn = PushButton("随机生成", self)
+        self.lite_toolcall_token_generate_btn.clicked.connect(self._generate_lite_toolcall_token)
+        token_row.addWidget(self.lite_toolcall_token_generate_btn)
+        options_form.addRow("Token:", token_row_widget)
+
+        layout.addWidget(self.lite_toolcall_options_widget)
+        layout.addStretch(1)
+
+        self.lite_toolcall_enabled_switch.checkedChanged.connect(self._update_lite_toolcall_options)
+        self.lite_toolcall_mode_combo.currentIndexChanged.connect(self._update_lite_toolcall_options)
+        return page
+
+    def _update_lite_toolcall_options(self):
+        enabled = self.lite_toolcall_enabled_switch.isChecked()
+        self.lite_toolcall_options_widget.setVisible(enabled)
+        is_forward = self._lite_toolcall_connection_mode_value() == "forward"
+        self.lite_toolcall_token_generate_btn.setVisible(enabled and is_forward)
+
+    def _generate_lite_toolcall_token(self):
+        specials = "!@#$%^&*()-_=+"
+        categories = [
+            string.ascii_lowercase,
+            string.ascii_uppercase,
+            string.digits,
+            specials,
+        ]
+        chars = [secrets.choice(category) for category in categories]
+        alphabet = "".join(categories)
+        chars.extend(secrets.choice(alphabet) for _ in range(20 - len(chars)))
+        for index in range(len(chars) - 1, 0, -1):
+            swap_index = secrets.randbelow(index + 1)
+            chars[index], chars[swap_index] = chars[swap_index], chars[index]
+        self.lite_toolcall_token_edit.setText("".join(chars))
+
     def _reset_window_geometry(self):
         self.settings.set("window", "x", 0)
         self.settings.set("window", "y", 0)
@@ -1246,6 +1325,13 @@ class SettingsWindow(QWidget):
             self.web_fetch_switch.setChecked(s.get("tools", "web_fetch_enabled", True))
             self.command_output_limit_edit.setText(str(s.get("tools", "command_output_limit", 12000)))
             self.auto_tool_round_limit_edit.setText(str(s.get("tools", "auto_tool_round_limit", 8)))
+
+            self.lite_toolcall_enabled_switch.setChecked(s.get("lite_toolcall", "enabled", False))
+            self._set_lite_toolcall_connection_mode(s.get("lite_toolcall", "connection_mode", "forward"))
+            self.lite_toolcall_host_edit.setText(s.get("lite_toolcall", "host", "127.0.0.1"))
+            self.lite_toolcall_port_edit.setText(str(s.get("lite_toolcall", "port", 8765)))
+            self.lite_toolcall_token_edit.setText(s.get("lite_toolcall", "token", ""))
+            self._update_lite_toolcall_options()
         finally:
             self._loading_values = False
 
@@ -1288,6 +1374,11 @@ class SettingsWindow(QWidget):
         s.set("tools", "web_fetch_enabled", self.web_fetch_switch.isChecked(), save=False)
         s.set("tools", "command_output_limit", self._command_output_limit_value(), save=False)
         s.set("tools", "auto_tool_round_limit", self._auto_tool_round_limit_value(), save=False)
+        s.set("lite_toolcall", "enabled", self.lite_toolcall_enabled_switch.isChecked(), save=False)
+        s.set("lite_toolcall", "connection_mode", self._lite_toolcall_connection_mode_value(), save=False)
+        s.set("lite_toolcall", "host", self.lite_toolcall_host_edit.text().strip() or "127.0.0.1", save=False)
+        s.set("lite_toolcall", "port", self._lite_toolcall_port_value(), save=False)
+        s.set("lite_toolcall", "token", self.lite_toolcall_token_edit.text(), save=False)
         s.save()
 
     def _import_highlight_theme(self):
@@ -1605,6 +1696,22 @@ class SettingsWindow(QWidget):
             return 5
         value = max(0, value)
         return 0 if value >= 1000000 else value
+
+    def _lite_toolcall_connection_mode_value(self) -> str:
+        return "reverse" if self.lite_toolcall_mode_combo.currentIndex() == 1 else "forward"
+
+    def _set_lite_toolcall_connection_mode(self, value: str):
+        self.lite_toolcall_mode_combo.setCurrentIndex(1 if value == "reverse" else 0)
+
+    def _lite_toolcall_port_value(self) -> int:
+        text = self.lite_toolcall_port_edit.text().strip()
+        if not text:
+            return 8765
+        try:
+            value = int(text)
+        except ValueError:
+            return 8765
+        return max(1, min(65535, value))
 
     @staticmethod
     def _format_tavily_usage_value(value) -> str:
