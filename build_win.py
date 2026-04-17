@@ -98,6 +98,7 @@ def _build_args() -> list[str]:
         "--hidden-import=PySide6.QtWebEngineCore",
         "--hidden-import=PySide6.QtWebEngineWidgets",
         "--hidden-import=PySide6.QtWebChannel",
+        "--hidden-import=PySide6.QtNetwork",
         "--hidden-import=PySide6.QtWebSockets",
     ]
     for module_name in QT_MODULE_EXCLUDES:
