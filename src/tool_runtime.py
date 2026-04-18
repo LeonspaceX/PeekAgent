@@ -325,6 +325,8 @@ class ToolParser:
                     raise ValueError("`command.timeout_seconds` must be a positive integer") from exc
                 if timeout <= 0:
                     raise ValueError("`command.timeout_seconds` must be greater than 0")
+            else:
+                timeout = 30
             context = node.get("context")
             if context is not None:
                 context = context.strip() or None
