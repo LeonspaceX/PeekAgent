@@ -127,6 +127,7 @@ class ChatView(QWebEngineView):
             "tool_client_connect": self._icon_data_uri(FluentIcon.LINK),
             "tool_client_command": self._icon_data_uri(FluentIcon.DEVELOPER_TOOLS),
             "tool_client_disconnect": self._icon_data_uri(FluentIcon.CANCEL_MEDIUM),
+            "tool_weather": self._icon_data_uri(FluentIcon.CLOUD),
         }
         return f"setActionIcons({json.dumps(icons, ensure_ascii=False)});"
 

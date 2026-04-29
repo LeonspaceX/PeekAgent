@@ -105,6 +105,7 @@ class ToolCall:
             "client_connect": "连接 SSH 客户端",
             "client_command": "SSH 远程执行命令",
             "client_disconnect": "断开 SSH 客户端",
+            "weather": "天气查询",
         }.get(self.tool_name, self.tool_name)
 
 
@@ -135,6 +136,7 @@ class ToolParser:
         "client_connect",
         "client_command",
         "client_disconnect",
+        "weather",
     }
 
     @staticmethod
@@ -371,6 +373,12 @@ class ToolParser:
             if not name:
                 raise ValueError("`client_disconnect` requires `name`")
             return {"name": name}
+
+        if tool_name == "weather":
+            city = (node.get("city") or (node.text or "")).strip()
+            if not city:
+                raise ValueError("`weather` requires `city`")
+            return {"city": city}
 
         raise ValueError(f"unsupported tool `{tool_name}`")
 
@@ -680,6 +688,8 @@ class ToolRuntime:
             return "auto" if self.settings.get("tools", "clipboard_enabled", True) else "off"
         if tool_name in {"client_list", "client_connect", "client_command", "client_disconnect"}:
             return self.settings.get("tools", "ssh_remote_command_mode", "manual")
+        if tool_name == "weather":
+            return "auto" if self.settings.get("tools", "weather_enabled", True) else "off"
         key = tool_name.replace("-", "_")
         return self.settings.get("tools", f"{key}_mode", "manual")
 
@@ -738,6 +748,8 @@ class ToolRuntime:
                 return self._client_command(call.payload)
             if call.tool_name == "client_disconnect":
                 return self._client_disconnect(call.payload)
+            if call.tool_name == "weather":
+                return self._weather(call.payload)
         except Exception as exc:
             message = self._error_content(f"{call.display_name}失败：{exc}")
             return ToolResult(call.tool_name, "error", message, message)
@@ -1164,6 +1176,40 @@ class ToolRuntime:
         else:
             content = self._success_content(f"SSH 会话 `{payload['name']}` 当前未连接。")
         return ToolResult("client_disconnect", "success", detail, content)
+
+    def _weather(self, payload: dict[str, Any]) -> ToolResult:
+        city = payload["city"]
+        api_key = (self.settings.get("integrations", "weather_api_key", "") or "").strip()
+        if not api_key:
+            raise ValueError("未配置天气 API Key，请在设置 → 集成中填写 weather_api_key")
+        try:
+            r = requests.get(
+                "https://api.seniverse.com/v3/weather/now.json",
+                params={"key": api_key, "location": city},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            result = data["results"][0]
+            now = result["now"]
+            detail = (
+                f"{result['location']['name']}：{now['text']}，"
+                f"{now['temperature']}°C，"
+                f"湿度 {now.get('humidity', '暂无')}%，"
+                f"{now.get('wind_direction', '暂无')}风 {now.get('wind_scale', '暂无')}级"
+            )
+            content = self._success_content(
+                f"位置：{result['location']['name']}\n"
+                f"天气：{now['text']}\n"
+                f"温度：{now['temperature']}°C\n"
+                f"湿度：{now.get('humidity', '暂无')}%\n"
+                f"风向：{now.get('wind_direction', '暂无')}\n"
+                f"风力：{now.get('wind_scale', '暂无')}级"
+            )
+            return ToolResult("weather", "success", detail, content)
+        except Exception as e:
+            message = self._error_content(f"获取天气失败：{e}")
+            return ToolResult("weather", "error", message, message)
 
     @staticmethod
     def _success_content(message: str) -> str:

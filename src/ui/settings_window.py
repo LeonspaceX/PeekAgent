@@ -277,7 +277,7 @@ class SettingsWindow(QWidget):
         # Left nav
         self.nav_list = ListWidget(self)
         self.nav_list.setFixedWidth(140)
-        for name in ["通用", "外观", "模型", "Tavily", "工具", "SSH 服务器", "提示词", "高级", "关于"]:
+        for name in ["通用", "外观", "模型", "集成", "工具", "SSH 服务器", "提示词", "高级", "关于"]:
             self.nav_list.addItem(name)
         self.nav_list.currentRowChanged.connect(self._switch_page)
         layout.addWidget(self.nav_list)
@@ -287,7 +287,7 @@ class SettingsWindow(QWidget):
         self.stack.addWidget(self._build_general_page())
         self.stack.addWidget(self._build_appearance_page())
         self.stack.addWidget(self._build_model_page())
-        self.stack.addWidget(self._build_tavily_page())
+        self.stack.addWidget(self._build_integrations_page())
         self.stack.addWidget(self._wrap_scroll(self._build_tools_page()))
         self.stack.addWidget(self._wrap_scroll(self._build_ssh_page()))
         self.stack.addWidget(self._build_prompt_page())
@@ -827,7 +827,7 @@ class SettingsWindow(QWidget):
 
         return page
 
-    def _build_tavily_page(self) -> QWidget:
+    def _build_integrations_page(self) -> QWidget:
         page = QWidget()
         page.setObjectName("settingsPage")
         layout = QVBoxLayout(page)
@@ -862,6 +862,20 @@ class SettingsWindow(QWidget):
         self.tavily_plan_text = BodyLabel("套餐类型：未获取", self)
         layout.addWidget(self.tavily_plan_text)
 
+        layout.addSpacing(20)
+        layout.addWidget(SubtitleLabel("天气查询配置"))
+
+        self.weather_api_key_edit = LineEdit(self)
+        self.weather_api_key_edit.setPlaceholderText("心知天气 API Key")
+        self.weather_api_key_edit.setEchoMode(LineEdit.EchoMode.Password)
+        key_label = BodyLabel("API Key:", self)
+        key_label.setFixedWidth(80)
+        weather_key_row = QHBoxLayout()
+        weather_key_row.setSpacing(8)
+        weather_key_row.addWidget(key_label)
+        weather_key_row.addWidget(self.weather_api_key_edit, 1)
+        layout.addLayout(weather_key_row)
+
         layout.addStretch()
         return page
 
@@ -888,6 +902,9 @@ class SettingsWindow(QWidget):
 
         self.web_fetch_switch = SwitchButton(self)
         form.addRow("抓取网页:", self.web_fetch_switch)
+
+        self.weather_enabled_switch = SwitchButton(self)
+        form.addRow("天气查询:", self.weather_enabled_switch)
 
         self.capture_mode_group, capture_row = self._create_mode_row()
         form.addRow("截图:", capture_row)
@@ -1317,6 +1334,8 @@ class SettingsWindow(QWidget):
             self.web_search_switch.setChecked(s.get("tools", "web_search_enabled", True))
             self.clipboard_switch.setChecked(s.get("tools", "clipboard_enabled", True))
             self.tavily_api_key_edit.setText(s.get("integrations", "tavily_api_key", ""))
+            self.weather_enabled_switch.setChecked(s.get("tools", "weather_enabled", True))
+            self.weather_api_key_edit.setText(s.get("integrations", "weather_api_key", ""))
             self._set_mode_group(self.write_mode_group, s.get("tools", "write_mode", "manual"))
             self._set_mode_group(self.add_mode_group, s.get("tools", "add_mode", "manual"))
             self._set_mode_group(self.replace_mode_group, s.get("tools", "replace_mode", "manual"))
@@ -1366,6 +1385,8 @@ class SettingsWindow(QWidget):
         s.set("tools", "web_search_enabled", self.web_search_switch.isChecked(), save=False)
         s.set("tools", "clipboard_enabled", self.clipboard_switch.isChecked(), save=False)
         s.set("integrations", "tavily_api_key", self.tavily_api_key_edit.text(), save=False)
+        s.set("tools", "weather_enabled", self.weather_enabled_switch.isChecked(), save=False)
+        s.set("integrations", "weather_api_key", self.weather_api_key_edit.text(), save=False)
         s.set("tools", "write_mode", self._mode_group_value(self.write_mode_group), save=False)
         s.set("tools", "add_mode", self._mode_group_value(self.add_mode_group), save=False)
         s.set("tools", "replace_mode", self._mode_group_value(self.replace_mode_group), save=False)
@@ -1632,10 +1653,10 @@ class SettingsWindow(QWidget):
             self.model_combo.hide()
             self.model_edit.show()
         else:
-            if current and self.model_combo.findText(current) < 0:
-                self.model_combo.addItem(current)
-            if current:
+            if current and self.model_combo.findText(current) >= 0:
                 self.model_combo.setCurrentText(current)
+            elif self.model_combo.count() > 0:
+                self.model_combo.setCurrentIndex(0)
             self.model_edit.hide()
             self.model_combo.show()
 
