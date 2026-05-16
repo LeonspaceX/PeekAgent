@@ -24,6 +24,7 @@ from src.chat_manager import ChatManager, ATTACHMENTS_DIR, normalize_session_tit
 from src.api_client import ApiClient, TitleWorker
 from src.config import ICON_PATH, Settings
 from src.tool_runtime import ToolCall, ToolExecutionWorker, ToolParser, ToolRuntime
+from src.utils.constants import IMAGE_EXTS
 
 
 class _GripWidget(QWidget):
@@ -384,8 +385,6 @@ class MainWindow(QWidget):
             self._show_error(str(e))
             self.input_area.set_streaming(False)
 
-    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-
     def _tool_result_context_limit(self) -> int:
         value = self.settings.get("general", "tool_result_context_limit", 5)
         try:
@@ -450,7 +449,7 @@ class MainWindow(QWidget):
             parts.append({"type": "text", "text": content})
         for p in attachments:
             ext = os.path.splitext(p)[1].lower()
-            if ext in self._IMAGE_EXTS:
+            if ext in IMAGE_EXTS:
                 try:
                     with open(p, "rb") as f:
                         b64 = base64.b64encode(f.read()).decode("ascii")
@@ -1029,6 +1028,9 @@ class MainWindow(QWidget):
             if call.payload.get("exclude_domains"):
                 parts.append("排除站点: " + ", ".join(call.payload.get("exclude_domains", [])))
             return "\n".join(parts)
+        if call.tool_name == "weather":
+            city = call.payload.get("city", "")
+            return f"查询城市: {city}" if city else "查询城市"
         if call.tool_name == "clipboard":
             if call.payload.get("kind") == "files":
                 return "\n".join(call.payload.get("paths", []))

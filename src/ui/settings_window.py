@@ -31,6 +31,7 @@ from src.config import (
     build_default_highlight_theme_bundle,
     get_app_version,
     load_highlight_theme_bundle,
+    normalize_model_channel,
 )
 from src.llm_client import LLMClient
 from src.ssh_manager import delete_client_config, list_clients_config, save_clients_config
@@ -560,30 +561,17 @@ class SettingsWindow(QWidget):
             encoding="utf-8",
         )
 
-    @staticmethod
-    def _normalize_channel(channel: dict, fallback_name: str) -> dict:
-        endpoint_type = channel.get("endpoint_type", channel.get("endpoint_format", "openai"))
-        if endpoint_type not in {"openai", "anthropic", "gemini"}:
-            endpoint_type = "openai"
-        name = str(channel.get("name") or fallback_name).strip() or fallback_name
-        return {
-            "name": name,
-            "endpoint_url": str(channel.get("endpoint_url", channel.get("endpoint", ""))),
-            "api_key": str(channel.get("api_key", "")),
-            "endpoint_type": endpoint_type,
-        }
-
     def _load_model_channels_from_settings(self):
         channels = self.settings.get("model", "channels", [])
         if not isinstance(channels, list):
             channels = []
         self._model_channels = [
-            self._normalize_channel(channel, f"渠道{index + 1}")
+            normalize_model_channel(channel, f"渠道{index + 1}")
             for index, channel in enumerate(channels)
             if isinstance(channel, dict)
         ]
         if not self._model_channels:
-            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+            self._model_channels = [normalize_model_channel({}, "默认渠道")]
         active_index = self.settings.get("model", "active_channel_index", 0)
         if not isinstance(active_index, int):
             active_index = 0
@@ -592,7 +580,7 @@ class SettingsWindow(QWidget):
 
     def _write_current_channel_from_form(self):
         if not self._model_channels:
-            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+            self._model_channels = [normalize_model_channel({}, "默认渠道")]
         index = max(0, min(self._editing_channel_index, len(self._model_channels) - 1))
         current = deepcopy(self._model_channels[index])
         current["endpoint_url"] = self.endpoint_url_edit.text()
@@ -602,7 +590,7 @@ class SettingsWindow(QWidget):
 
     def _load_channel_to_form(self, index: int):
         if not self._model_channels:
-            self._model_channels = [self._normalize_channel({}, "默认渠道")]
+            self._model_channels = [normalize_model_channel({}, "默认渠道")]
         index = max(0, min(index, len(self._model_channels) - 1))
         channel = self._model_channels[index]
         self._editing_channel_index = index
@@ -863,7 +851,7 @@ class SettingsWindow(QWidget):
         layout.addWidget(self.tavily_plan_text)
 
         layout.addSpacing(20)
-        layout.addWidget(SubtitleLabel("天气查询配置"))
+        layout.addWidget(SubtitleLabel("心知天气API配置"))
 
         self.weather_api_key_edit = LineEdit(self)
         self.weather_api_key_edit.setPlaceholderText("心知天气 API Key")

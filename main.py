@@ -62,42 +62,29 @@ from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 from qfluentwidgets import FluentTranslator, Theme, isDarkTheme, setTheme, setThemeColor
 
+QApplication.setHighDpiScaleFactorRoundingPolicy(
+    Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+)
+
 from src.config import Settings
 from src.lite_toolcall_server import LiteToolcallConfig, LiteToolcallServer
 from src.startup_manager import maybe_handle_startup_helper
 
 
-def _extract_update_finish_arg(argv: list[str]) -> tuple[str | None, list[str]]:
-    update_finish_version = None
+def _extract_arg(argv: list[str], flag: str, has_value: bool = False) -> tuple[str | bool | None, list[str]]:
+    value: str | bool | None = None if has_value else False
     filtered = [argv[0]]
     for item in argv[1:]:
-        if item.startswith("--update-finish="):
-            update_finish_version = item.split("=", 1)[1].strip()
+        if has_value:
+            prefix = f"{flag}="
+            if item.startswith(prefix):
+                value = item.split("=", 1)[1].strip()
+                continue
+        elif item == flag:
+            value = True
             continue
         filtered.append(item)
-    return update_finish_version, filtered
-
-
-def _extract_no_open_window_arg(argv: list[str]) -> tuple[bool, list[str]]:
-    no_open_window = False
-    filtered = [argv[0]]
-    for item in argv[1:]:
-        if item == "--no-open-window":
-            no_open_window = True
-            continue
-        filtered.append(item)
-    return no_open_window, filtered
-
-
-def _extract_lite_toolcall_arg(argv: list[str]) -> tuple[bool, list[str]]:
-    lite_toolcall = False
-    filtered = [argv[0]]
-    for item in argv[1:]:
-        if item == "--lite_toolcall":
-            lite_toolcall = True
-            continue
-        filtered.append(item)
-    return lite_toolcall, filtered
+    return value, filtered
 
 
 class _HotkeyBridge(QObject):
@@ -426,9 +413,9 @@ class LiteToolcallTrayApp:
 
 
 if __name__ == "__main__":
-    update_finish_version, qt_argv = _extract_update_finish_arg(sys.argv)
-    no_open_window, qt_argv = _extract_no_open_window_arg(qt_argv)
-    lite_toolcall, qt_argv = _extract_lite_toolcall_arg(qt_argv)
+    update_finish_version, qt_argv = _extract_arg(sys.argv, "--update-finish", has_value=True)
+    no_open_window, qt_argv = _extract_arg(qt_argv, "--no-open-window")
+    lite_toolcall, qt_argv = _extract_arg(qt_argv, "--lite_toolcall")
     helper_exit_code = maybe_handle_startup_helper(qt_argv[1:])
     if helper_exit_code is not None:
         sys.exit(helper_exit_code)
@@ -444,7 +431,6 @@ if __name__ == "__main__":
     try:
         exit_code = app.run()
     except KeyboardInterrupt:
-        app._graceful_quit()
         exit_code = 0
     finally:
         app._graceful_quit()

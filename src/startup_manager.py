@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import subprocess
 import sys
 import tempfile
-from ctypes import wintypes
 from pathlib import Path
 
 from src.config import BASE_DIR
+from src.utils.shell import shell_execute_and_wait
 
 
 _REG_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -75,55 +74,16 @@ def request_auto_start_update(enabled: bool):
     error_path = error_file.name
     error_file.close()
 
-    SEE_MASK_NOCLOSEPROCESS = 0x00000040
-    SW_SHOWNORMAL = 1
-    INFINITE = 0xFFFFFFFF
-
-    class SHELLEXECUTEINFOW(ctypes.Structure):
-        _fields_ = [
-            ("cbSize", wintypes.DWORD),
-            ("fMask", wintypes.ULONG),
-            ("hwnd", wintypes.HWND),
-            ("lpVerb", wintypes.LPCWSTR),
-            ("lpFile", wintypes.LPCWSTR),
-            ("lpParameters", wintypes.LPCWSTR),
-            ("lpDirectory", wintypes.LPCWSTR),
-            ("nShow", ctypes.c_int),
-            ("hInstApp", wintypes.HINSTANCE),
-            ("lpIDList", wintypes.LPVOID),
-            ("lpClass", wintypes.LPCWSTR),
-            ("hkeyClass", wintypes.HKEY),
-            ("dwHotKey", wintypes.DWORD),
-            ("hIcon", wintypes.HANDLE),
-            ("hProcess", wintypes.HANDLE),
-        ]
-
-    shell32 = ctypes.windll.shell32
-    kernel32 = ctypes.windll.kernel32
     executable, parameters = _helper_invocation(enabled, error_path)
 
     try:
-        execute_info = SHELLEXECUTEINFOW()
-        execute_info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
-        execute_info.fMask = SEE_MASK_NOCLOSEPROCESS
-        execute_info.lpVerb = "runas"
-        execute_info.lpFile = executable
-        execute_info.lpParameters = parameters
-        execute_info.nShow = SW_SHOWNORMAL
-
-        if not shell32.ShellExecuteExW(ctypes.byref(execute_info)):
-            code = ctypes.GetLastError()
-            if code == 1223:
-                raise RuntimeError("已取消管理员权限请求。")
-            raise ctypes.WinError(code)
-        if not execute_info.hProcess:
-            raise RuntimeError("系统没有返回可等待的提权进程。")
-
-        kernel32.WaitForSingleObject(execute_info.hProcess, INFINITE)
-        exit_code = wintypes.DWORD()
-        if not kernel32.GetExitCodeProcess(execute_info.hProcess, ctypes.byref(exit_code)):
-            raise ctypes.WinError()
-        if exit_code.value != 0:
+        try:
+            exit_code = shell_execute_and_wait("runas", executable, parameters)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1223:
+                raise RuntimeError("已取消管理员权限请求。") from exc
+            raise
+        if exit_code != 0:
             message = ""
             try:
                 message = Path(error_path).read_text(encoding="utf-8").strip()
@@ -131,11 +91,6 @@ def request_auto_start_update(enabled: bool):
                 message = ""
             raise RuntimeError(message or "开机自启系统配置失败。")
     finally:
-        try:
-            if "execute_info" in locals() and execute_info.hProcess:
-                kernel32.CloseHandle(execute_info.hProcess)
-        except Exception:
-            pass
         try:
             Path(error_path).unlink(missing_ok=True)
         except Exception:

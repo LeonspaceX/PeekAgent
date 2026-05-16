@@ -226,15 +226,8 @@ class UpdateWorker(QThread):
                             New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
                         }}
 
-                        if ($false -and (Test-Path -LiteralPath $targetPath)) {{
-                            $existingItem = Get-Item -LiteralPath $targetPath
-                            if (-not $existingItem.PSIsContainer -and $existingItem.Length -eq $file.Length) {{
-                                $copiedBytes += $file.Length
-                                $percent = if ($totalBytes -gt 0) {{ [Math]::Min(100, [int]($copiedBytes * 100 / $totalBytes)) }} else {{ 100 }}
-                                Show-ProgressLine -Percent $percent -CurrentItem ($relativePath + " (跳过)")
-                                continue
-                            }}
-                        }}
+                        # Temporarily disabled: do not skip copies based on file size alone.
+                        # Files in the update package may share size with old files while content differs.
 
                         if ($file.Length -eq 0) {{
                             [System.IO.File]::WriteAllBytes($targetPath, [byte[]]::new(0))

@@ -128,7 +128,7 @@ class ApiClient:
         channels = settings.get("model", "channels", [])
         active_index = settings.get("model", "active_channel_index", 0)
         if not isinstance(channels, list) or not channels:
-            raise ValueError("璇峰厛鍦ㄨ缃腑閰嶇疆绔偣 URL 鍜?API Key")
+            raise ValueError("请先在设置中配置端点 URL 和 API Key")
         if not isinstance(active_index, int):
             active_index = 0
         active_index = max(0, min(active_index, len(channels) - 1))

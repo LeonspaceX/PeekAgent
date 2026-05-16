@@ -33,11 +33,11 @@ from src.ssh_manager import (
     client_list as ssh_client_list,
     disconnect_all_clients,
 )
+from src.utils.constants import IMAGE_EXTS
 
 
 _TOOL_CALLS_PATTERN = re.compile(r"(?is)<tool_calls>([\s\S]*?)</tool_calls>")
 _NONE_PATTERN = re.compile(r"(?is)<none>(.*?)</none>")
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _TEXT_EXTS = {
     ".md",
     ".py",
@@ -769,7 +769,7 @@ class ToolRuntime:
             content = self._success_content(f"已读取目录：{path}\n{detail}")
             return ToolResult("read", "success", detail, content)
 
-        if path.suffix.lower() in _IMAGE_EXTS:
+        if path.suffix.lower() in IMAGE_EXTS:
             detail = str(path)
             content = self._success_content(f"已读取图片：{path}")
             return ToolResult("read", "success", detail, content, attachments=[str(path)])

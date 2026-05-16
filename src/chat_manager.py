@@ -16,6 +16,13 @@ def normalize_session_title(title: str | None) -> str:
 
 
 class ChatManager:
+    """Lightweight file CRUD wrapper for chat sessions.
+
+    Callers are responsible for maintaining message structure and any
+    higher-level invariants. This class intentionally stays close to the raw
+    JSON session files.
+    """
+
     def __init__(self):
         CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
 

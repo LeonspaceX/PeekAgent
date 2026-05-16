@@ -1,13 +1,11 @@
 """Input area widget: multi-line text input + send button + attachment."""
 
-import ctypes
 import os
 import subprocess
 import sys
 import uuid
 import tempfile
 from pathlib import Path
-from ctypes import wintypes
 
 from PySide6.QtCore import Signal, Qt, QSize, QMimeData, QTimer, QThread
 from PySide6.QtWidgets import (
@@ -17,49 +15,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QKeyEvent, QImage, QPixmap, QDragEnterEvent, QDropEvent, QInputMethodEvent
 from qfluentwidgets import PlainTextEdit, PushButton, ToolButton, FluentIcon, InfoBar, InfoBarPosition
 from src.config import Settings
+from src.utils.shell import shell_execute_and_wait
 
 
 def _open_default_editor_and_wait(path: str):
     if os.name == "nt":
-        SEE_MASK_NOCLOSEPROCESS = 0x00000040
-        SW_SHOWNORMAL = 1
-        INFINITE = 0xFFFFFFFF
-
-        class SHELLEXECUTEINFOW(ctypes.Structure):
-            _fields_ = [
-                ("cbSize", wintypes.DWORD),
-                ("fMask", wintypes.ULONG),
-                ("hwnd", wintypes.HWND),
-                ("lpVerb", wintypes.LPCWSTR),
-                ("lpFile", wintypes.LPCWSTR),
-                ("lpParameters", wintypes.LPCWSTR),
-                ("lpDirectory", wintypes.LPCWSTR),
-                ("nShow", ctypes.c_int),
-                ("hInstApp", wintypes.HINSTANCE),
-                ("lpIDList", wintypes.LPVOID),
-                ("lpClass", wintypes.LPCWSTR),
-                ("hkeyClass", wintypes.HKEY),
-                ("dwHotKey", wintypes.DWORD),
-                ("hIcon", wintypes.HANDLE),
-                ("hProcess", wintypes.HANDLE),
-            ]
-
-        shell32 = ctypes.windll.shell32
-        kernel32 = ctypes.windll.kernel32
-        execute_info = SHELLEXECUTEINFOW()
-        execute_info.cbSize = ctypes.sizeof(SHELLEXECUTEINFOW)
-        execute_info.fMask = SEE_MASK_NOCLOSEPROCESS
-        execute_info.lpVerb = "open"
-        execute_info.lpFile = path
-        execute_info.nShow = SW_SHOWNORMAL
-
-        if not shell32.ShellExecuteExW(ctypes.byref(execute_info)):
-            raise ctypes.WinError()
-        if not execute_info.hProcess:
-            raise RuntimeError("系统没有返回可等待的编辑器进程。")
-
-        kernel32.WaitForSingleObject(execute_info.hProcess, INFINITE)
-        kernel32.CloseHandle(execute_info.hProcess)
+        shell_execute_and_wait("open", path)
         return
 
     if sys.platform == "darwin":

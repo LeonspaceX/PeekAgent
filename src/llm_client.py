@@ -41,47 +41,30 @@ def _decode_sse_line(raw_line) -> str:
     return raw_line
 
 
-def _extract_openai_text(message_content) -> str:
-    if isinstance(message_content, str):
-        return message_content
-    if isinstance(message_content, list):
+def _extract_text_from_content(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
         texts = []
-        for item in message_content:
-            if isinstance(item, dict) and item.get("type") == "text":
+        for item in content:
+            if isinstance(item, dict) and item.get("type", "text") == "text":
                 text = item.get("text", "")
                 if text:
                     texts.append(text)
         return "".join(texts)
     return ""
+
+
+def _extract_openai_text(message_content) -> str:
+    return _extract_text_from_content(message_content)
 
 
 def _extract_anthropic_text(message_content) -> str:
-    if isinstance(message_content, str):
-        return message_content
-    if isinstance(message_content, list):
-        texts = []
-        for item in message_content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                text = item.get("text", "")
-                if text:
-                    texts.append(text)
-        return "".join(texts)
-    return ""
+    return _extract_text_from_content(message_content)
 
 
 def _extract_gemini_text(parts) -> str:
-    if isinstance(parts, str):
-        return parts
-    if isinstance(parts, list):
-        texts = []
-        for item in parts:
-            if not isinstance(item, dict):
-                continue
-            text = item.get("text", "")
-            if text:
-                texts.append(text)
-        return "".join(texts)
-    return ""
+    return _extract_text_from_content(parts)
 
 
 def _data_url_to_anthropic_source(url: str) -> dict | None:

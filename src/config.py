@@ -162,6 +162,10 @@ def _normalize_model_channel(channel: dict, fallback_name: str = "默认渠道")
     }
 
 
+def normalize_model_channel(channel: dict, fallback_name: str = "默认渠道") -> dict:
+    return _normalize_model_channel(channel, fallback_name)
+
+
 def migrate_model_settings(data: dict) -> bool:
     """Migrate model settings to channels format in-place.
 
