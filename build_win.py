@@ -21,6 +21,8 @@ APP_DIR = DIST_DIR / APP_NAME
 ARCHIVE_PATH = DIST_DIR / f"{ARCHIVE_NAME}.zip"
 CHANGELOG_PATH = ROOT_DIR / "CHANGELOG.md"
 VERSION_PATH = ROOT_DIR / "version.txt"
+TRANSLATION_KEEP_SUFFIXES = ("_zh_CN.qm", "_en.qm")
+WEBENGINE_LOCALE_KEEP_FILES = {"zh-CN.pak", "en-US.pak"}
 
 QT_MODULE_EXCLUDES = [
     "PySide6.Qt3DAnimation",
@@ -146,6 +148,54 @@ def _read_packaged_version(app_dir: Path) -> str:
     raise RuntimeError("Built package is missing version.txt")
 
 
+def _clean_packaged_files(app_dir: Path) -> None:
+    removed_files: list[tuple[Path, int]] = []
+
+    def remove_file(path: Path) -> None:
+        if not path.is_file():
+            return
+        size = path.stat().st_size
+        path.unlink()
+        removed_files.append((path, size))
+
+    resources_dir = app_dir / "_internal" / "PySide6" / "resources"
+    debug_resource_names = [
+        "qtwebengine_devtools_resources.debug.pak",
+        "qtwebengine_resources.debug.pak",
+        "qtwebengine_resources_100p.debug.pak",
+        "qtwebengine_resources_200p.debug.pak",
+    ]
+    for name in debug_resource_names:
+        remove_file(resources_dir / name)
+
+    debug_snapshot = resources_dir / "v8_context_snapshot.debug.bin"
+    release_snapshot = resources_dir / "v8_context_snapshot.bin"
+    if release_snapshot.is_file():
+        remove_file(debug_snapshot)
+
+    translations_dir = app_dir / "_internal" / "PySide6" / "translations"
+    if translations_dir.is_dir():
+        for qm_file in translations_dir.glob("*.qm"):
+            if qm_file.name.endswith(TRANSLATION_KEEP_SUFFIXES):
+                continue
+            remove_file(qm_file)
+
+        webengine_locales_dir = translations_dir / "qtwebengine_locales"
+        if webengine_locales_dir.is_dir():
+            for locale_file in webengine_locales_dir.glob("*"):
+                if locale_file.name in WEBENGINE_LOCALE_KEEP_FILES:
+                    continue
+                remove_file(locale_file)
+
+    if removed_files:
+        total_saved = sum(size for _, size in removed_files)
+        print(f"Removed {len(removed_files)} packaged files, saved {total_saved / (1024 * 1024):.1f} MiB")
+        for path, size in removed_files:
+            print(f"  - {path.relative_to(app_dir)} ({size / (1024 * 1024):.1f} MiB)")
+    else:
+        print("No packaged files were removed.")
+
+
 def _zip_dist() -> Path:
     archive_base = DIST_DIR / ARCHIVE_NAME
     shutil.make_archive(str(archive_base), "zip", root_dir=DIST_DIR, base_dir=APP_NAME)
@@ -167,6 +217,7 @@ def main() -> int:
         raise RuntimeError(
             f"Packaged version mismatch: expected {version}, got {packaged_version}"
         )
+    _clean_packaged_files(APP_DIR)
     archive_path = _zip_dist()
     print(f"Build complete: {APP_DIR}")
     print(f"Release archive: {archive_path}")

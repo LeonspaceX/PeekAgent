@@ -1,3 +1,11 @@
+## [0.2.3]
+
+### 改进
+
+- 优化 Windows `onedir` 构建产物体积：打包完成后会在压缩前清理 `PySide6/QtWebEngine` 的调试资源文件，减少冗余发布内容
+- 精简 PySide6 翻译资源：仅保留中文与英文所需的 `.qm` 文件，以及 `qtwebengine_locales` 中的 `zh-CN` / `en-US` 语言包
+- 保持发布物格式不变，继续使用 `PeekAgent-windows-amd64.zip`，无需调整现有 GitHub Releases 分发与应用内更新流程
+
 ## [0.2.2]
 
 ### 改进
