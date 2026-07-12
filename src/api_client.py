@@ -1,6 +1,5 @@
 """High-level application API client backed by the shared LLM adapter."""
 
-import datetime as dt
 import getpass
 import json
 import os
@@ -22,17 +21,6 @@ def _hidden_powershell_subprocess_kwargs() -> dict:
         kwargs["startupinfo"] = startupinfo
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     return kwargs
-
-
-def _build_runtime_time_profile() -> str:
-    now = dt.datetime.now().astimezone()
-    timezone_name = now.tzname() or "unknown"
-    timezone_id = getattr(now.tzinfo, "key", None) or str(now.tzinfo or "unknown")
-    current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-    return (
-        f"- 当前时间：{current_time}\n"
-        f"- 时区：{timezone_id} ({timezone_name})"
-    )
 
 
 def _detect_system_profile() -> str:
@@ -159,7 +147,7 @@ class ApiClient:
         if system_path.exists():
             parts.append(system_path.read_text(encoding="utf-8"))
         if self._system_profile:
-            parts.append(f"{self._system_profile}\n{_build_runtime_time_profile()}")
+            parts.append(self._system_profile)
         if memory_path.exists():
             memory = memory_path.read_text(encoding="utf-8")
             parts.append(f"你的记忆：\n{memory}".rstrip())
