@@ -996,42 +996,340 @@ function wrapTables(root) {
 /* Streaming support */
 let _streamDiv = null;
 let _streamBubble = null;
-let _streamText = '';
+let _streamCommittedRoot = null;
+let _streamActiveRoot = null;
+let _streamReceivedText = '';
+let _streamShownText = '';
+let _streamVisibleText = '';
+let _streamActiveText = '';
+let _streamShownOffset = 0;
 let _streamIndex = -1;
-let _streamRenderTimer = null;
+let _streamTickTimer = null;
+let _streamPreviewTimer = null;
+let _streamTextNode = null;
+let _streamStartedAt = 0;
+let _streamToolFilterBuffer = '';
+let _streamInsideToolMarkup = false;
+let _streamSourceFinished = false;
+let _streamLineText = '';
+let _streamFenceMarker = null;
+let _streamFollowScroll = true;
+let _streamLastScrollAt = 0;
 
-function renderStreamContent(force = false) {
-  if (!_streamBubble) {
-    return;
-  }
-  if (!force && _streamRenderTimer) {
-    return;
-  }
-  const doRender = () => {
-    _streamRenderTimer = null;
-    if (!_streamBubble) {
-      return;
+const STREAM_FRAME_MS = 16;
+const STREAM_INITIAL_BUFFER = 12;
+const STREAM_INITIAL_WAIT_MS = 120;
+const STREAM_MARKDOWN_PREVIEW_MS = 150;
+const STREAM_SCROLL_INTERVAL_MS = 80;
+const STREAM_TOOL_OPEN = '<tool_calls>';
+const STREAM_TOOL_CLOSE = '</tool_calls>';
+const streamGraphemeSegmenter = typeof Intl !== 'undefined' && Intl.Segmenter
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null;
+
+function isNearBottom() {
+  return window.innerHeight + window.scrollY >= document.body.scrollHeight - 48;
+}
+
+if (typeof window.addEventListener === 'function') {
+  window.addEventListener('scroll', () => {
+    if (_streamBubble) {
+      _streamFollowScroll = isNearBottom();
     }
-    const displayText = stripToolMarkup(_streamText);
-    _streamBubble.style.whiteSpace = '';
-    _streamBubble.innerHTML = md.render(displayText);
-    wrapTables(_streamBubble);
-    renderMath(_streamBubble);
-    window.scrollTo(0, document.body.scrollHeight);
-  };
-  if (force) {
-    doRender();
-  } else {
-    _streamRenderTimer = setTimeout(doRender, 100);
+  }, { passive: true });
+}
+
+function scrollStreamToBottom(force = false) {
+  if (!_streamFollowScroll) {
+    return;
+  }
+  const now = performance.now();
+  if (!force && now - _streamLastScrollAt < STREAM_SCROLL_INTERVAL_MS) {
+    return;
+  }
+  _streamLastScrollAt = now;
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function takeStreamGraphemes(text, count) {
+  if (!text || count <= 0) {
+    return '';
+  }
+  if (!streamGraphemeSegmenter) {
+    return Array.from(text).slice(0, count).join('');
+  }
+
+  let end = 0;
+  let seen = 0;
+  for (const part of streamGraphemeSegmenter.segment(text)) {
+    seen += 1;
+    end = part.index + part.segment.length;
+    if (seen >= count) {
+      break;
+    }
+  }
+  return text.slice(0, end);
+}
+
+function streamChunkSize() {
+  // Typewriter mode: one grapheme per tick, never a batch of characters.
+  return 1;
+}
+
+function pendingTagPrefixLength(text, tag) {
+  const maxLength = Math.min(text.length, tag.length - 1);
+  for (let length = maxLength; length > 0; length -= 1) {
+    if (text.endsWith(tag.slice(0, length))) {
+      return length;
+    }
+  }
+  return 0;
+}
+
+function consumeStreamToolMarkup(text) {
+  _streamToolFilterBuffer += text;
+  let visible = '';
+
+  while (_streamToolFilterBuffer) {
+    if (_streamInsideToolMarkup) {
+      const closeAt = _streamToolFilterBuffer.indexOf(STREAM_TOOL_CLOSE);
+      if (closeAt < 0) {
+        // Keep only enough tail to recognize a closing tag split across chunks.
+        _streamToolFilterBuffer = _streamToolFilterBuffer.slice(-(STREAM_TOOL_CLOSE.length - 1));
+        break;
+      }
+      _streamToolFilterBuffer = _streamToolFilterBuffer.slice(closeAt + STREAM_TOOL_CLOSE.length);
+      _streamInsideToolMarkup = false;
+      continue;
+    }
+
+    const openAt = _streamToolFilterBuffer.indexOf(STREAM_TOOL_OPEN);
+    if (openAt >= 0) {
+      visible += _streamToolFilterBuffer.slice(0, openAt);
+      _streamToolFilterBuffer = _streamToolFilterBuffer.slice(openAt + STREAM_TOOL_OPEN.length);
+      _streamInsideToolMarkup = true;
+      continue;
+    }
+
+    // Only hold a suffix that could still become an opening tag in the next chunk.
+    const pendingLength = pendingTagPrefixLength(_streamToolFilterBuffer, STREAM_TOOL_OPEN);
+    const safeLength = _streamToolFilterBuffer.length - pendingLength;
+    visible += _streamToolFilterBuffer.slice(0, safeLength);
+    _streamToolFilterBuffer = _streamToolFilterBuffer.slice(safeLength);
+    break;
+  }
+  return visible;
+}
+
+function appendStreamPlainText(text) {
+  if (!text) {
+    return '';
+  }
+  const visible = consumeStreamToolMarkup(text);
+  if (!visible) {
+    return '';
+  }
+  _streamVisibleText += visible;
+  _streamActiveText += visible;
+  if (_streamTextNode) {
+    _streamTextNode.appendData(visible);
+  }
+  updateStreamBlockState(visible);
+  scheduleActivePreview();
+  return visible;
+}
+
+function fenceMarkerForLine(line) {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})/);
+  return match ? match[1] : null;
+}
+
+function isClosingFence(line, marker) {
+  const match = line.match(/^ {0,3}(`+|~+)[ \t]*$/);
+  return Boolean(
+    match &&
+    match[1][0] === marker[0] &&
+    match[1].length >= marker.length
+  );
+}
+
+function updateStreamBlockState(text) {
+  for (const character of text) {
+    if (character === '\r') {
+      continue;
+    }
+    if (character !== '\n') {
+      _streamLineText += character;
+      continue;
+    }
+
+    const completedLine = _streamLineText;
+    _streamLineText = '';
+    if (_streamFenceMarker) {
+      if (isClosingFence(completedLine, _streamFenceMarker)) {
+        _streamFenceMarker = null;
+        commitActiveBlock();
+      }
+      continue;
+    }
+
+    const openingFence = fenceMarkerForLine(completedLine);
+    if (openingFence) {
+      _streamFenceMarker = openingFence;
+      continue;
+    }
+    // A blank line is a conservative boundary for paragraphs, lists, quotes and tables.
+    if (!completedLine.trim()) {
+      commitActiveBlock();
+    }
   }
 }
 
+function appendStreamTail() {
+  if (!_streamActiveRoot) {
+    return;
+  }
+  const tail = document.createElement('span');
+  tail.className = 'stream-tail';
+  tail.style.whiteSpace = 'pre-wrap';
+  const containers = typeof _streamActiveRoot.querySelectorAll === 'function'
+    ? _streamActiveRoot.querySelectorAll('p, li, blockquote, td, th, h1, h2, h3, h4, h5, h6, code')
+    : [];
+  const parent = containers.length ? containers[containers.length - 1] : _streamActiveRoot;
+  _streamTextNode = document.createTextNode('');
+  tail.appendChild(_streamTextNode);
+  parent.appendChild(tail);
+}
+
+function renderMarkdownBlock(root, text, renderBlockMath = false) {
+  root.innerHTML = md.render(text);
+  wrapTables(root);
+  if (renderBlockMath) {
+    renderMath(root);
+  }
+}
+
+function renderActiveMarkdownPreview() {
+  _streamPreviewTimer = null;
+  if (!_streamActiveRoot || !_streamActiveText || _streamFenceMarker) {
+    return;
+  }
+  renderMarkdownBlock(_streamActiveRoot, _streamActiveText);
+  appendStreamTail();
+  scrollStreamToBottom();
+}
+
+function scheduleActivePreview() {
+  if (_streamPreviewTimer || !_streamActiveText || _streamFenceMarker) {
+    return;
+  }
+  _streamPreviewTimer = setTimeout(renderActiveMarkdownPreview, STREAM_MARKDOWN_PREVIEW_MS);
+}
+
+function commitActiveBlock() {
+  if (!_streamActiveText || !_streamCommittedRoot || !_streamActiveRoot) {
+    return;
+  }
+  if (_streamPreviewTimer) {
+    clearTimeout(_streamPreviewTimer);
+    _streamPreviewTimer = null;
+  }
+  const renderedBlock = document.createElement('div');
+  renderMarkdownBlock(renderedBlock, _streamActiveText, true);
+  while (renderedBlock.firstChild) {
+    _streamCommittedRoot.appendChild(renderedBlock.firstChild);
+  }
+  _streamActiveText = '';
+  _streamActiveRoot.innerHTML = '';
+  appendStreamTail();
+  scrollStreamToBottom(true);
+}
+
+function scheduleStreamTick() {
+  if (_streamTickTimer || !_streamBubble) {
+    return;
+  }
+  _streamTickTimer = setTimeout(() => {
+    _streamTickTimer = null;
+    if (!_streamBubble) {
+      return;
+    }
+
+    const backlog = _streamReceivedText.length - _streamShownOffset;
+    if (backlog <= 0) {
+      if (_streamSourceFinished) {
+        completeStream();
+      }
+      return;
+    }
+    const elapsed = Date.now() - _streamStartedAt;
+    if (
+      !_streamSourceFinished &&
+      _streamShownOffset === 0 &&
+      backlog < STREAM_INITIAL_BUFFER &&
+      elapsed < STREAM_INITIAL_WAIT_MS
+    ) {
+      scheduleStreamTick();
+      return;
+    }
+
+    const chunk = takeStreamGraphemes(
+      _streamReceivedText.slice(_streamShownOffset),
+      streamChunkSize()
+    );
+    if (!chunk) {
+      return;
+    }
+    _streamShownOffset += chunk.length;
+    _streamShownText += chunk;
+    appendStreamPlainText(chunk);
+    scrollStreamToBottom();
+
+    if (_streamShownOffset < _streamReceivedText.length) {
+      scheduleStreamTick();
+    } else if (_streamSourceFinished) {
+      completeStream();
+    }
+  }, STREAM_FRAME_MS);
+}
+
+function renderFinalStreamContent() {
+  if (!_streamBubble) {
+    return;
+  }
+  const displayText = stripToolMarkup(_streamReceivedText);
+  _streamBubble.style.whiteSpace = '';
+  _streamBubble.innerHTML = md.render(displayText);
+  wrapTables(_streamBubble);
+  renderMath(_streamBubble);
+  scrollStreamToBottom(true);
+}
+
 function startStream(index) {
-  _streamText = '';
+  if (_streamBubble) {
+    completeStream();
+  }
+  _streamReceivedText = '';
+  _streamShownText = '';
+  _streamVisibleText = '';
+  _streamActiveText = '';
+  _streamShownOffset = 0;
   _streamIndex = index;
-  if (_streamRenderTimer) {
-    clearTimeout(_streamRenderTimer);
-    _streamRenderTimer = null;
+  _streamStartedAt = Date.now();
+  _streamToolFilterBuffer = '';
+  _streamInsideToolMarkup = false;
+  _streamSourceFinished = false;
+  _streamLineText = '';
+  _streamFenceMarker = null;
+  _streamFollowScroll = isNearBottom();
+  _streamLastScrollAt = 0;
+  if (_streamTickTimer) {
+    clearTimeout(_streamTickTimer);
+    _streamTickTimer = null;
+  }
+  if (_streamPreviewTimer) {
+    clearTimeout(_streamPreviewTimer);
+    _streamPreviewTimer = null;
   }
   const container = document.getElementById('chat-container');
   _streamDiv = document.createElement('div');
@@ -1039,25 +1337,38 @@ function startStream(index) {
   _streamDiv.dataset.index = index;
   _streamBubble = document.createElement('div');
   _streamBubble.className = 'bubble';
-  _streamBubble.innerHTML = '';
+  _streamCommittedRoot = document.createElement('div');
+  _streamCommittedRoot.className = 'stream-committed';
+  _streamActiveRoot = document.createElement('div');
+  _streamActiveRoot.className = 'stream-active';
+  _streamBubble.appendChild(_streamCommittedRoot);
+  _streamBubble.appendChild(_streamActiveRoot);
+  appendStreamTail();
   _streamDiv.appendChild(_streamBubble);
   container.appendChild(_streamDiv);
 }
 
 function appendToken(token) {
-  _streamText += token;
-  renderStreamContent(false);
+  if (!token) {
+    return;
+  }
+  _streamReceivedText += token;
+  scheduleStreamTick();
 }
 
-function finishStream() {
+function completeStream() {
+  if (_streamTickTimer) {
+    clearTimeout(_streamTickTimer);
+    _streamTickTimer = null;
+  }
+  if (_streamPreviewTimer) {
+    clearTimeout(_streamPreviewTimer);
+    _streamPreviewTimer = null;
+  }
   if (_streamBubble && _streamDiv) {
-    const displayText = stripToolMarkup(_streamText);
-    if (_streamRenderTimer) {
-      clearTimeout(_streamRenderTimer);
-      _streamRenderTimer = null;
-    }
+    const displayText = stripToolMarkup(_streamReceivedText);
     if (displayText) {
-      renderStreamContent(true);
+      renderFinalStreamContent();
       attachMessageActions(_streamDiv, 'assistant', _streamIndex, displayText);
     } else {
       _streamDiv.remove();
@@ -1065,12 +1376,48 @@ function finishStream() {
   }
   _streamDiv = null;
   _streamBubble = null;
-  _streamText = '';
+  _streamCommittedRoot = null;
+  _streamActiveRoot = null;
+  _streamTextNode = null;
+  _streamReceivedText = '';
+  _streamShownText = '';
+  _streamVisibleText = '';
+  _streamActiveText = '';
+  _streamShownOffset = 0;
+  _streamToolFilterBuffer = '';
+  _streamInsideToolMarkup = false;
+  _streamSourceFinished = false;
+  _streamLineText = '';
+  _streamFenceMarker = null;
   _streamIndex = -1;
-  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function finishStream() {
+  if (!_streamBubble || !_streamDiv) {
+    return;
+  }
+  _streamSourceFinished = true;
+  if (_streamShownOffset < _streamReceivedText.length) {
+    scheduleStreamTick();
+  } else {
+    completeStream();
+  }
 }
 
 function clearChat() {
+  if (_streamTickTimer) {
+    clearTimeout(_streamTickTimer);
+    _streamTickTimer = null;
+  }
+  if (_streamPreviewTimer) {
+    clearTimeout(_streamPreviewTimer);
+    _streamPreviewTimer = null;
+  }
+  _streamDiv = null;
+  _streamBubble = null;
+  _streamCommittedRoot = null;
+  _streamActiveRoot = null;
+  _streamTextNode = null;
   document.getElementById('chat-container').innerHTML = '';
   setHasOlderMessages(false);
 }
