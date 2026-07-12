@@ -1,5 +1,7 @@
 """Main floating window for PeekAgent."""
 
+from __future__ import annotations
+
 import os
 import base64
 import json
@@ -9,7 +11,7 @@ import uuid
 import time
 from PySide6.QtCore import Qt, QPoint, QSize, QRect, QTimer, QEvent, QObject, Signal
 from PySide6.QtWidgets import (
-    QVBoxLayout, QHBoxLayout, QWidget, QSystemTrayIcon, QMenu,
+    QVBoxLayout, QHBoxLayout, QStackedLayout, QWidget, QSystemTrayIcon, QMenu,
     QApplication,
 )
 from PySide6.QtGui import QIcon, QAction, QCursor, QPainter, QColor, QPainterPath, QBrush, QRegion
@@ -17,13 +19,9 @@ from qfluentwidgets import (
     ToolButton, FluentIcon, BodyLabel, InfoBar, InfoBarPosition,
     MessageBox, MSFluentWindow, isDarkTheme,
 )
-from src.ui.chat_view import ChatView
-from src.ui.input_area import InputArea
-from src.ui.sidebar import Sidebar
 from src.chat_manager import ChatManager, ATTACHMENTS_DIR, normalize_session_title
-from src.api_client import ApiClient, TitleWorker
 from src.config import ICON_PATH, Settings
-from src.tool_runtime import ToolCall, ToolExecutionWorker, ToolParser, ToolRuntime
+from src.tools.protocol import ToolCall, ToolParser
 from src.utils.constants import IMAGE_EXTS
 
 
@@ -48,8 +46,8 @@ class MainWindow(QWidget):
         super().__init__()
         self.settings = Settings()
         self.chat_mgr = ChatManager()
-        self.api_client = ApiClient()
-        self.tool_runtime = ToolRuntime()
+        self.api_client = None
+        self.tool_runtime = None
         self._current_session = None
         self._stream_worker = None
         self._pending_assistant_reply = False
@@ -72,11 +70,12 @@ class MainWindow(QWidget):
         self._title_typing_index = 0
         self._title_typing_session_id = None
         self._shutdown_done = False
+        self._deferred_ui_started = False
+        self._sidebar_open_requested = False
         self._task_started_at: float | None = None
         self._notification_tray: QSystemTrayIcon | None = None
         self._background_task_bridge = _BackgroundTaskBridge(self)
         self._background_task_bridge.taskCompleted.connect(self._on_background_task_completed)
-        self.tool_runtime.background_tasks.set_completion_callback(self._background_task_bridge.taskCompleted.emit)
 
         self._save_geo_timer = QTimer(self)
         self._save_geo_timer.setSingleShot(True)
@@ -88,47 +87,64 @@ class MainWindow(QWidget):
         self._apply_theme()
         self._init_resize_grips()
         self._load_or_create_session()
+        self._create_chat_view()
 
-        # Pre-warm API client in background thread to avoid first-send delay
-        QTimer.singleShot(200, self._prewarm_client)
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._deferred_ui_started:
+            return
+        self._deferred_ui_started = True
+        QTimer.singleShot(250, self._create_sidebar)
+        QTimer.singleShot(350, self._prewarm_client)
 
     def _prewarm_client(self):
         import threading
         def _warm():
             try:
-                self.api_client._ensure_client()
+                self._ensure_api_client()._ensure_client()
             except Exception:
                 pass
         threading.Thread(target=_warm, daemon=True).start()
+
+    def _ensure_api_client(self):
+        if self.api_client is None:
+            from src.api_client import ApiClient
+
+            self.api_client = ApiClient()
+        return self.api_client
+
+    def _ensure_tool_runtime(self):
+        if self.tool_runtime is None:
+            from src.tools.runtime import ToolRuntime
+
+            self.tool_runtime = ToolRuntime()
+            self.tool_runtime.background_tasks.set_completion_callback(
+                self._background_task_bridge.taskCompleted.emit
+            )
+        return self.tool_runtime
 
     def _init_window(self):
         self.setWindowTitle("PeekAgent")
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
 
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.Tool
-        )
-        self.setWindowFlag(
-            Qt.WindowType.WindowStaysOnTopHint,
-            bool(self.settings.get("general", "always_on_top", True)),
-        )
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
+        if self.settings.get("general", "always_on_top", True):
+            flags |= Qt.WindowType.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         # Restore window geometry
         w = self.settings.get("window", "width", 420)
         h = self.settings.get("window", "height", 620)
-        self.resize(w, h)
-
         x = self.settings.get("window", "x", -1)
         y = self.settings.get("window", "y", -1)
-        if x >= 0 and y >= 0:
-            self.move(x, y)
-        else:
+        if x < 0 or y < 0:
             # Default: bottom-right corner
             screen = QApplication.primaryScreen().availableGeometry()
-            self.move(screen.width() - w - 20, screen.height() - h - 20)
+            x = screen.width() - w - 20
+            y = screen.height() - h - 20
+        self.setGeometry(x, y, w, h)
 
     BORDER_RADIUS = 12
 
@@ -160,16 +176,19 @@ class MainWindow(QWidget):
 
         main_layout.addWidget(title_bar)
 
-        # Chat view
-        self.chat_view = ChatView(self)
-        self.chat_view.copy_requested.connect(self._copy_message)
-        self.chat_view.edit_requested.connect(self._edit_message)
-        self.chat_view.regenerate_requested.connect(self._regenerate_message)
-        self.chat_view.tool_approval_requested.connect(self._handle_tool_approval)
-        self.chat_view.load_older_requested.connect(self._load_older_messages)
-        main_layout.addWidget(self.chat_view, 1)
+        # A visually neutral placeholder lets the native window appear before
+        # Chromium/WebEngine is initialized on the first event-loop turn.
+        self.chat_view = None
+        self._chat_host = QWidget(self)
+        self._chat_stack = QStackedLayout(self._chat_host)
+        self._chat_stack.setContentsMargins(0, 0, 0, 0)
+        self._chat_stack.setStackingMode(QStackedLayout.StackingMode.StackAll)
+        self._chat_placeholder = QWidget(self._chat_host)
+        self._chat_stack.addWidget(self._chat_placeholder)
+        main_layout.addWidget(self._chat_host, 1)
 
         # Input area
+        from src.ui.input_area import InputArea
         self.input_area = InputArea(self)
         self.input_area.message_sent.connect(self._on_send)
         self.input_area.stop_requested.connect(self._on_stop)
@@ -181,22 +200,66 @@ class MainWindow(QWidget):
         self._overlay.hide()
         self._overlay.mousePressEvent = lambda e: self._close_sidebar()
 
-        # Sidebar (overlay, not in layout)
+        # Sidebar is initialized shortly after the window is first shown.
+        self.sidebar = None
+
+    def _create_sidebar(self):
+        if self.sidebar is not None or self._shutdown_done:
+            return
+        from src.ui.sidebar import Sidebar
+
         self.sidebar = Sidebar(self)
         self.sidebar.session_selected.connect(self._switch_session)
         self.sidebar.session_new.connect(self._new_session)
         self.sidebar.session_deleted.connect(self._delete_session)
         self.sidebar.session_renamed.connect(self._rename_session)
+        self.sidebar.setFixedHeight(self.height())
+        self.sidebar.apply_theme()
+        self._refresh_sidebar()
+        self.sidebar.show()
         self.sidebar.raise_()
+        if self._sidebar_open_requested:
+            self._sidebar_open_requested = False
+            self._open_sidebar()
 
-    def _apply_theme(self, dark_mode: bool | None = None):
-        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
+    def _create_chat_view(self):
+        if self.chat_view is not None or self._shutdown_done:
+            return
+        from src.ui.chat_view import ChatView
+
+        chat_view = ChatView(self._chat_host)
+        chat_view.copy_requested.connect(self._copy_message)
+        chat_view.edit_requested.connect(self._edit_message)
+        chat_view.regenerate_requested.connect(self._regenerate_message)
+        chat_view.tool_approval_requested.connect(self._handle_tool_approval)
+        chat_view.load_older_requested.connect(self._load_older_messages)
+        self._chat_stack.addWidget(chat_view)
+        self._chat_stack.setCurrentWidget(self._chat_placeholder)
+        self.chat_view = chat_view
+        self._apply_chat_theme(isDarkTheme())
+        self._render_current_session()
+        chat_view.loadFinished.connect(self._show_loaded_chat_view)
+
+    def _show_loaded_chat_view(self, ok: bool):
+        if ok and self.chat_view is not None:
+            self._chat_stack.setCurrentWidget(self.chat_view)
+
+    def _apply_chat_theme(self, dark_mode: bool):
+        background = "#181818" if dark_mode else "#ffffff"
+        self._chat_placeholder.setStyleSheet(f"background: {background}; border: none;")
+        if self.chat_view is None:
+            return
         primary_color = self.settings.get("appearance", "primary_theme_color", "#0ea5a4")
         user_color = self.settings.get("appearance", "theme_color_1", "#1a73e8")
         ai_color = self.settings.get("appearance", "theme_color_2", "#7c3aed")
         self.chat_view.set_theme(primary_color, user_color, ai_color, dark_mode)
         self.chat_view.apply_highlight_theme()
-        self.sidebar.apply_theme()
+
+    def _apply_theme(self, dark_mode: bool | None = None):
+        dark_mode = isDarkTheme() if dark_mode is None else dark_mode
+        self._apply_chat_theme(dark_mode)
+        if self.sidebar is not None:
+            self.sidebar.apply_theme()
         self.input_area.apply_settings()
         self.update()
 
@@ -218,12 +281,18 @@ class MainWindow(QWidget):
         self.input_area.focus_text_input()
 
     def _toggle_sidebar(self):
+        if self.sidebar is None:
+            self._sidebar_open_requested = True
+            self._create_sidebar()
+            return
         if self.sidebar._expanded:
             self._close_sidebar()
         else:
             self._open_sidebar()
 
     def _open_sidebar(self):
+        if self.sidebar is None:
+            return
         self._overlay.setGeometry(self.rect())
         self._overlay.show()
         self._overlay.raise_()
@@ -231,6 +300,8 @@ class MainWindow(QWidget):
         self.sidebar.expand()
 
     def _close_sidebar(self):
+        if self.sidebar is None:
+            return
         self.sidebar.collapse()
         self._overlay.hide()
 
@@ -260,7 +331,8 @@ class MainWindow(QWidget):
         data = self.chat_mgr.create_session()
         self._current_session = data
         self.title_label.setText(data["title"])
-        self.chat_view.clear_chat()
+        if self.chat_view is not None:
+            self.chat_view.clear_chat()
         self._refresh_sidebar()
 
     def _switch_session(self, sid: str):
@@ -282,7 +354,8 @@ class MainWindow(QWidget):
             self.chat_mgr.delete_session(sid)
             if self._current_session and self._current_session["id"] == sid:
                 self._current_session = None
-                self.chat_view.clear_chat()
+                if self.chat_view is not None:
+                    self.chat_view.clear_chat()
                 self.title_label.setText("PeekAgent")
                 self._load_or_create_session()
             self._refresh_sidebar()
@@ -298,6 +371,8 @@ class MainWindow(QWidget):
             self.title_label.setText(new_title)
 
     def _refresh_sidebar(self):
+        if self.sidebar is None:
+            return
         sessions = self.chat_mgr.list_sessions()
         current_id = self._current_session["id"] if self._current_session else ""
         self.sidebar.load_sessions(sessions, current_id)
@@ -517,6 +592,8 @@ class MainWindow(QWidget):
         return attachment_text
 
     def _render_current_session(self):
+        if self.chat_view is None:
+            return
         self.chat_view.clear_chat()
         if not self._current_session:
             return
@@ -582,7 +659,7 @@ class MainWindow(QWidget):
         if self._flush_pending_background_results(trigger_follow_up=False):
             self.chat_mgr.save_session(self._current_session)
         messages = self._build_api_messages()
-        worker = self.api_client.send_stream(messages)
+        worker = self._ensure_api_client().send_stream(messages)
         self._stream_worker = worker
         assistant_index = len(self._current_session["messages"])
         self.chat_view.start_stream(assistant_index)
@@ -600,6 +677,7 @@ class MainWindow(QWidget):
         self.chat_mgr.save_session(self._current_session)
         completed_background_tasks = self._flush_pending_background_results(trigger_follow_up=False)
         if tool_call_groups:
+            self._ensure_tool_runtime()
             if self._tool_round_has_manual_gate(tool_call_groups):
                 self._consecutive_auto_tool_rounds = 0
             else:
@@ -716,6 +794,8 @@ class MainWindow(QWidget):
         self._run_tool_call(call, tool_id)
 
     def _run_tool_call(self, call: ToolCall, tool_id: str):
+        from src.tools.runtime import ToolExecutionWorker
+
         existing = self._find_message_by_tool_id(tool_id)
         if existing is None:
             self._append_tool_result(
@@ -875,7 +955,7 @@ class MainWindow(QWidget):
         return result
 
     def _flush_pending_background_results(self, trigger_follow_up: bool = False) -> bool:
-        if not self._current_session:
+        if not self._current_session or self.tool_runtime is None:
             return False
         session_id = self._current_session.get("id")
         results = self.tool_runtime.background_tasks.pop_completed_results(session_id)
@@ -1056,11 +1136,13 @@ class MainWindow(QWidget):
 
     def _generate_title(self, user_msg: str, ai_msg: str):
         try:
-            self.api_client._ensure_client()
+            api_client = self._ensure_api_client()
             model = Settings().get("model", "model_name", "")
             if not model:
                 return
-            worker = TitleWorker(self.api_client, model, user_msg, ai_msg)
+            from src.api_client import TitleWorker
+
+            worker = TitleWorker(api_client, model, user_msg, ai_msg)
             worker.title_ready.connect(self._on_title_ready)
             self._title_worker = worker
             worker.start()
@@ -1109,7 +1191,8 @@ class MainWindow(QWidget):
         self.input_area.set_streaming(False)
 
     def _on_stream_worker_finished(self, worker):
-        self.api_client.clear_worker(worker)
+        if self.api_client is not None:
+            self.api_client.clear_worker(worker)
         if self._stream_worker is worker:
             self._stream_worker = None
         worker.deleteLater()
@@ -1360,10 +1443,12 @@ class MainWindow(QWidget):
         self._tool_flow_stopped = True
         self._pending_assistant_reply = False
         self._finish_task_timer(False)
-        self.tool_runtime.background_tasks.set_completion_callback(None)
+        if self.tool_runtime is not None:
+            self.tool_runtime.background_tasks.set_completion_callback(None)
 
         try:
-            self.api_client.cancel()
+            if self.api_client is not None:
+                self.api_client.cancel()
         except Exception:
             pass
 
@@ -1379,7 +1464,8 @@ class MainWindow(QWidget):
             except Exception:
                 pass
             if finished:
-                self.api_client.clear_worker(stream_worker)
+                if self.api_client is not None:
+                    self.api_client.clear_worker(stream_worker)
                 if self._stream_worker is stream_worker:
                     self._stream_worker = None
                 try:
@@ -1403,16 +1489,18 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
-        try:
-            self.tool_runtime.close()
-        except Exception:
-            pass
+        if self.tool_runtime is not None:
+            try:
+                self.tool_runtime.close()
+            except Exception:
+                pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._save_geo_timer.start()
         self._overlay.setGeometry(self.rect())
-        self.sidebar.setFixedHeight(self.height())
+        if self.sidebar is not None:
+            self.sidebar.setFixedHeight(self.height())
         self._layout_grips()
 
     def moveEvent(self, event):
