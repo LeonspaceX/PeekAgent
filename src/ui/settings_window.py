@@ -1058,6 +1058,21 @@ class SettingsWindow(QWidget):
             self.memory_prompt_edit.setPlainText(memory_path.read_text(encoding="utf-8"))
         layout.addWidget(self.memory_prompt_edit, 1)
 
+        prompt_options = QFormLayout()
+        prompt_options.setContentsMargins(0, 0, 0, 0)
+        prompt_options.setSpacing(12)
+        self.inject_system_environment_switch = SwitchButton(self)
+        self.inject_system_environment_switch.setChecked(
+            self.settings.get("prompt", "inject_system_environment", True)
+        )
+        prompt_options.addRow("注入系统环境信息:", self.inject_system_environment_switch)
+        self.inject_current_time_switch = SwitchButton(self)
+        self.inject_current_time_switch.setChecked(
+            self.settings.get("prompt", "inject_current_time", False)
+        )
+        prompt_options.addRow("注入当前时间:", self.inject_current_time_switch)
+        layout.addLayout(prompt_options)
+
         save_btn = PrimaryPushButton("保存", self)
         save_btn.clicked.connect(self._save_prompt)
         layout.addWidget(save_btn)
@@ -1070,6 +1085,20 @@ class SettingsWindow(QWidget):
         memory_path = PROMPT_DIR / "MEMORY.md"
         system_path.write_text(self.system_prompt_edit.toPlainText(), encoding="utf-8")
         memory_path.write_text(self.memory_prompt_edit.toPlainText(), encoding="utf-8")
+        self.settings.set(
+            "prompt",
+            "inject_system_environment",
+            self.inject_system_environment_switch.isChecked(),
+            save=False,
+        )
+        self.settings.set(
+            "prompt",
+            "inject_current_time",
+            self.inject_current_time_switch.isChecked(),
+            save=False,
+        )
+        self.settings.save()
+        self.settings_saved.emit()
         InfoBar.success("已保存", "SYSTEM.md 和 MEMORY.md 已更新", parent=self,
                         position=InfoBarPosition.TOP, duration=3000)
 

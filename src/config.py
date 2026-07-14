@@ -93,6 +93,10 @@ DEFAULT_SETTINGS = {
     "integrations": {
         "tavily_api_key": "",
     },
+    "prompt": {
+        "inject_system_environment": True,
+        "inject_current_time": False,
+    },
     "window": {
         "width": 420,
         "height": 620,

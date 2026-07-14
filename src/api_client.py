@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import subprocess
+from datetime import datetime
 
 from PySide6.QtCore import QThread, Signal
 
@@ -102,6 +103,57 @@ def _detect_system_profile() -> str:
     )
 
 
+def _format_current_time_context(now: datetime | None = None) -> str:
+    local_now = now or datetime.now().astimezone()
+    if local_now.tzinfo is None:
+        local_now = local_now.astimezone()
+    offset = local_now.utcoffset()
+    offset_minutes = int(offset.total_seconds() // 60) if offset is not None else 0
+    sign = "+" if offset_minutes >= 0 else "-"
+    offset_minutes = abs(offset_minutes)
+    hours, minutes = divmod(offset_minutes, 60)
+    utc_offset = f"UTC {sign}{hours}"
+    if minutes:
+        utc_offset += f":{minutes:02d}"
+    return (
+        f"\n当前时区 {utc_offset}\n"
+        f"当前时间：{local_now.strftime('%Y/%m/%d %H:%M')}"
+    )
+
+
+def _with_current_time_context(messages: list, now: datetime | None = None) -> list:
+    """Append ephemeral time context to the last user message without mutating history."""
+    prepared = list(messages)
+    time_context = _format_current_time_context(now)
+
+    for index in range(len(prepared) - 1, -1, -1):
+        source = prepared[index]
+        if not isinstance(source, dict) or source.get("role") != "user":
+            continue
+        message = dict(source)
+        content = message.get("content", "")
+        if isinstance(content, str):
+            message["content"] = content + time_context
+        elif isinstance(content, list):
+            blocks = [dict(block) if isinstance(block, dict) else block for block in content]
+            for block_index in range(len(blocks) - 1, -1, -1):
+                block = blocks[block_index]
+                if isinstance(block, dict) and block.get("type") == "text":
+                    updated_block = dict(block)
+                    updated_block["text"] = str(updated_block.get("text", "")) + time_context
+                    blocks[block_index] = updated_block
+                    break
+            else:
+                blocks.append({"type": "text", "text": time_context})
+            message["content"] = blocks
+        else:
+            message["content"] = str(content or "") + time_context
+        prepared[index] = message
+        break
+
+    return prepared
+
+
 class ApiClient:
     def __init__(self):
         self._client: LLMClient | None = None
@@ -109,7 +161,7 @@ class ApiClient:
         self._last_url: str = ""
         self._last_key: str = ""
         self._last_endpoint_type: str = ""
-        self._system_profile = _detect_system_profile()
+        self._system_profile: str | None = None
 
     def _ensure_client(self):
         settings = Settings()
@@ -141,13 +193,17 @@ class ApiClient:
 
     def _build_system_prompt(self) -> str:
         parts = []
+        settings = Settings()
         system_path = PROMPT_DIR / "SYSTEM.md"
         memory_path = PROMPT_DIR / "MEMORY.md"
         tools_path = RESOURCE_DIR / "TOOLS.md"
         if system_path.exists():
             parts.append(system_path.read_text(encoding="utf-8"))
-        if self._system_profile:
-            parts.append(self._system_profile)
+        if settings.get("prompt", "inject_system_environment", True):
+            if self._system_profile is None:
+                self._system_profile = _detect_system_profile()
+            if self._system_profile:
+                parts.append(self._system_profile)
         if memory_path.exists():
             memory = memory_path.read_text(encoding="utf-8")
             parts.append(f"你的记忆：\n{memory}".rstrip())
@@ -164,11 +220,14 @@ class ApiClient:
         if not model:
             raise ValueError("请先在设置中选择模型")
 
+        request_messages = messages
+        if settings.get("prompt", "inject_current_time", False):
+            request_messages = _with_current_time_context(messages)
         stream_client = LLMClient(self._last_url, self._last_key, self._last_endpoint_type)
         worker = StreamWorker(
             stream_client,
             model=model,
-            messages=messages,
+            messages=request_messages,
             system_prompt=self._build_system_prompt(),
         )
         self._current_worker = worker
