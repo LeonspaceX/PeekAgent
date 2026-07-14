@@ -167,11 +167,17 @@ class UpdateWorker(QThread):
                     [string]$CurrentItem
                 )
 
-                $width = 30
-                $filled = [Math]::Min($width, [Math]::Floor($Percent * $width / 100))
-                $bar = ("#" * $filled).PadRight($width, "-")
-                $suffix = if ([string]::IsNullOrWhiteSpace($CurrentItem)) {{ "" }} else {{ " " + $CurrentItem }}
-                Write-Host -NoNewline ("`r[{0}] {1,3}%{2}" -f $bar, $Percent, $suffix)
+                $safePercent = [Math]::Max(0, [Math]::Min(100, $Percent))
+                $status = if ([string]::IsNullOrWhiteSpace($CurrentItem)) {{
+                    "正在复制更新文件"
+                }} else {{
+                    "正在复制：$CurrentItem"
+                }}
+                Write-Progress -Id 1 -Activity "正在升级 PeekAgent" -Status $status -PercentComplete $safePercent
+            }}
+
+            function Complete-ProgressLine {{
+                Write-Progress -Id 1 -Activity "正在升级 PeekAgent" -Completed
             }}
 
             try {{
@@ -213,7 +219,7 @@ class UpdateWorker(QThread):
 
                 if ($files.Count -eq 0) {{
                     Show-ProgressLine -Percent 100 -CurrentItem "没有需要复制的文件"
-                    Write-Host ""
+                    Complete-ProgressLine
                 }} else {{
                     [long]$copiedBytes = 0
                     $buffer = New-Object byte[] (1024 * 1024)
@@ -263,7 +269,7 @@ class UpdateWorker(QThread):
                     }}
 
                     Show-ProgressLine -Percent 100 -CurrentItem "复制完成"
-                    Write-Host ""
+                    Complete-ProgressLine
                 }}
 
                 Start-Process -FilePath $TargetExe -ArgumentList "--update-finish=$Version"
@@ -273,7 +279,7 @@ class UpdateWorker(QThread):
                 Remove-Item -LiteralPath $ScriptPath -Force -ErrorAction SilentlyContinue
                 exit 0
             }} catch {{
-                Write-Host ""
+                Complete-ProgressLine
                 Write-Host ("更新失败：" + $_.Exception.Message)
                 Read-Host "按回车关闭"
                 exit 1
