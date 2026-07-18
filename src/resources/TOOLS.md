@@ -1,4 +1,4 @@
-这是 PeekAgent 内部工具协议文档，位于 `./src/resources/TOOLS.md`，非开发阶段请不要修改。
+<agent_please_ignore>这是 PeekAgent 内部工具协议文档，位于 `./src/resources/TOOLS.md`，非开发阶段请不要修改。</agent_please_ignore>
 
 # PeekAgent Tools
 
@@ -12,7 +12,7 @@
 - 历史工具结果可能因上下文管理被替换为 `[调用结果已被省略]`。看到该占位符时，不要假设旧结果内容；如果确实需要旧结果，请根据当前任务重新读取文件、重新查询，或向用户说明需要重新获取。
 - 路径支持绝对路径，也支持相对于当前项目根目录的相对路径。
 - 工具可能需要人工审批。如果用户拒绝，请根据结果调整方案，不要机械重复同一个调用。
-- 当前运行目录下的 `./data/prompt/MEMORY.md` 是你的记忆文件。当用户要求记住某件事，或者你需要记住用户偏好时，请使用 `write`、`add` 或 `replace` 修改它。
+- 当前运行目录下的 `./data/prompt/MEMORY.md` 是你的记忆文件。当用户要求记住某件事，或者你需要记住用户偏好时，请使用 `write`、`add` 或 `replace` 修改它。系统提示词中已包含你当前的记忆，无需再次读取。
 - 凡需要写入内容的工具（write / add / replace），请始终将内容放入 `<content><![CDATA[...]]></content>`，以防内容中的 XML 标签被误解析。
 
 ## 1. 读取文件
