@@ -1,106 +1,12 @@
 """High-level application API client backed by the shared LLM adapter."""
 
-import getpass
-import json
-import os
-import platform
-import subprocess
 from datetime import datetime
 
 from PySide6.QtCore import QThread, Signal
 
 from src.config import PROMPT_DIR, RESOURCE_DIR, Settings
 from src.llm_client import LLMClient, StreamWorker
-
-
-def _hidden_powershell_subprocess_kwargs() -> dict:
-    kwargs = {}
-    if os.name == "nt":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
-
-
-def _detect_system_profile() -> str:
-    username = getpass.getuser() or "unknown"
-
-    os_name = platform.system() or "Unknown OS"
-    os_version = platform.release() or platform.version() or "unknown"
-    powershell_version = "unknown"
-
-    if os_name == "Windows":
-        try:
-            result = subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    (
-                        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-                        "$cv = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; "
-                        "$payload = [ordered]@{"
-                        "product_name=$cv.ProductName; "
-                        "display_version=$cv.DisplayVersion; "
-                        "release_id=$cv.ReleaseId; "
-                        "build_number=$cv.CurrentBuildNumber; "
-                        "ubr=$cv.UBR; "
-                        "ps_version=$PSVersionTable.PSVersion.ToString()"
-                        "}; "
-                        "$payload | ConvertTo-Json -Compress"
-                    ),
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=5,
-                **_hidden_powershell_subprocess_kwargs(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                data = json.loads(result.stdout.strip())
-                product_name = str(data.get("product_name") or "Windows").strip()
-                display_version = str(data.get("display_version") or data.get("release_id") or "").strip()
-                build_number = str(data.get("build_number") or "").strip()
-                ubr = data.get("ubr")
-
-                os_name = product_name
-                if display_version:
-                    os_version = display_version
-                if build_number:
-                    build_text = build_number
-                    if ubr not in (None, ""):
-                        build_text = f"{build_text}.{ubr}"
-                    os_version = f"{os_version} (build {build_text})" if display_version else f"build {build_text}"
-
-                powershell_version = str(data.get("ps_version") or powershell_version).strip() or powershell_version
-        except Exception:
-            pass
-
-    if powershell_version == "unknown":
-        try:
-            result = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=3,
-                **_hidden_powershell_subprocess_kwargs(),
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                powershell_version = result.stdout.strip()
-        except Exception:
-            pass
-
-    return (
-        "当前运行环境：\n"
-        f"- 操作系统：{os_name} {os_version}\n"
-        f"- 当前用户名：{username}\n"
-        f"- PowerShell 版本：{powershell_version}"
-    )
+from src.system_profile import get_system_profile
 
 
 def _format_current_time_context(now: datetime | None = None) -> str:
@@ -161,7 +67,6 @@ class ApiClient:
         self._last_url: str = ""
         self._last_key: str = ""
         self._last_endpoint_type: str = ""
-        self._system_profile: str | None = None
 
     def _ensure_client(self):
         settings = Settings()
@@ -200,10 +105,9 @@ class ApiClient:
         if system_path.exists():
             parts.append(system_path.read_text(encoding="utf-8"))
         if settings.get("prompt", "inject_system_environment", True):
-            if self._system_profile is None:
-                self._system_profile = _detect_system_profile()
-            if self._system_profile:
-                parts.append(self._system_profile)
+            system_profile = get_system_profile()
+            if system_profile:
+                parts.append(system_profile)
         if memory_path.exists():
             memory = memory_path.read_text(encoding="utf-8")
             parts.append(f"你的记忆：\n{memory}".rstrip())

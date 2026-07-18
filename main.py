@@ -21,6 +21,10 @@ def _append_chromium_flag(flag: str):
 _append_chromium_flag("--disable-direct-composition")
 _append_chromium_flag("--disable-features=DirectComposition")
 
+from src.system_profile import start_system_profile_warmup
+
+start_system_profile_warmup()
+
 # Ensure data directories exist and seed default prompt files
 from src.config import BASE_DIR, ICON_PATH, SETTINGS_PATH, build_default_highlight_theme_bundle, build_initial_settings
 

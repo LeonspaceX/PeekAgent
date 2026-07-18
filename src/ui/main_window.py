@@ -21,6 +21,7 @@ from qfluentwidgets import (
 )
 from src.chat_manager import ChatManager, ATTACHMENTS_DIR, normalize_session_title
 from src.config import ICON_PATH, Settings
+from src.system_profile import is_system_profile_ready, start_system_profile_warmup
 from src.tools.protocol import ToolCall, ToolParser
 from src.utils.constants import IMAGE_EXTS
 
@@ -76,6 +77,7 @@ class MainWindow(QWidget):
         self._notification_tray: QSystemTrayIcon | None = None
         self._background_task_bridge = _BackgroundTaskBridge(self)
         self._background_task_bridge.taskCompleted.connect(self._on_background_task_completed)
+        self._system_profile_wait_scheduled = False
 
         self._save_geo_timer = QTimer(self)
         self._save_geo_timer.setSingleShot(True)
@@ -95,16 +97,7 @@ class MainWindow(QWidget):
             return
         self._deferred_ui_started = True
         QTimer.singleShot(250, self._create_sidebar)
-        QTimer.singleShot(350, self._prewarm_client)
-
-    def _prewarm_client(self):
-        import threading
-        def _warm():
-            try:
-                self._ensure_api_client()._ensure_client()
-            except Exception:
-                pass
-        threading.Thread(target=_warm, daemon=True).start()
+        start_system_profile_warmup()
 
     def _ensure_api_client(self):
         if self.api_client is None:
@@ -656,6 +649,11 @@ class MainWindow(QWidget):
         if self._stream_worker is not None and self._stream_worker.isRunning():
             self._pending_assistant_reply = True
             return
+        if not is_system_profile_ready():
+            self._pending_assistant_reply = True
+            start_system_profile_warmup()
+            self._schedule_system_profile_retry()
+            return
         if self._flush_pending_background_results(trigger_follow_up=False):
             self.chat_mgr.save_session(self._current_session)
         messages = self._build_api_messages()
@@ -668,6 +666,27 @@ class MainWindow(QWidget):
         worker.error_occurred.connect(self._on_stream_error)
         worker.finished.connect(lambda w=worker: self._on_stream_worker_finished(w))
         worker.start()
+
+    def _schedule_system_profile_retry(self):
+        if self._system_profile_wait_scheduled or self._shutdown_done:
+            return
+        self._system_profile_wait_scheduled = True
+        QTimer.singleShot(100, self._retry_after_system_profile_warmup)
+
+    def _retry_after_system_profile_warmup(self):
+        self._system_profile_wait_scheduled = False
+        if self._shutdown_done or not self._pending_assistant_reply:
+            return
+        if not is_system_profile_ready():
+            self._schedule_system_profile_retry()
+            return
+        self._pending_assistant_reply = False
+        try:
+            self._request_assistant_reply()
+        except Exception as error:
+            self._finish_task_timer(False)
+            self._show_error(str(error))
+            self.input_area.set_streaming(False)
 
     def _on_stream_done(self, full_text: str):
         self.chat_view.finish_stream()
