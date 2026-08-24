@@ -40,7 +40,6 @@ class MainWindow(QWidget):
     EDGE_SIZE = 8  # pixels for resize grip
     RIGHT_RESIZE_GUTTER = 4
     WORKER_SHUTDOWN_TIMEOUT_MS = 2000
-    OMITTED_TOOL_RESULT_TEXT = "[调用结果已被省略]"
     HISTORY_RENDER_BATCH_SIZE = 30
 
     def __init__(self):
@@ -75,6 +74,7 @@ class MainWindow(QWidget):
         self._sidebar_open_requested = False
         self._task_started_at: float | None = None
         self._notification_tray: QSystemTrayIcon | None = None
+        self._diff_windows: list[QWidget] = []
         self._background_task_bridge = _BackgroundTaskBridge(self)
         self._background_task_bridge.taskCompleted.connect(self._on_background_task_completed)
         self._system_profile_wait_scheduled = False
@@ -226,6 +226,7 @@ class MainWindow(QWidget):
         chat_view.regenerate_requested.connect(self._regenerate_message)
         chat_view.tool_approval_requested.connect(self._handle_tool_approval)
         chat_view.load_older_requested.connect(self._load_older_messages)
+        chat_view.diff_requested.connect(self._show_tool_diff)
         self._chat_stack.addWidget(chat_view)
         self._chat_stack.setCurrentWidget(self._chat_placeholder)
         self.chat_view = chat_view
@@ -442,6 +443,8 @@ class MainWindow(QWidget):
         self._current_session["messages"].append(msg)
         self.chat_mgr.save_session(self._current_session)
         self.chat_view.add_message("user", self._message_display_text(msg), message_index)
+        if message_index == 0 and text.strip():
+            self._generate_title(text)
         self.input_area.set_streaming(True)
         self._start_task_timer()
 
@@ -452,36 +455,6 @@ class MainWindow(QWidget):
             self._finish_task_timer(False)
             self._show_error(str(e))
             self.input_area.set_streaming(False)
-
-    def _tool_result_context_limit(self) -> int:
-        value = self.settings.get("general", "tool_result_context_limit", 5)
-        try:
-            parsed = int(value)
-        except (TypeError, ValueError):
-            return 5
-        parsed = max(0, parsed)
-        return 0 if parsed >= 1000000 else parsed
-
-    def _included_tool_context_indexes(self, messages: list[dict]) -> set[int] | None:
-        limit = self._tool_result_context_limit()
-        if limit <= 0:
-            return None
-
-        included: list[int] = []
-        for index in range(len(messages) - 1, -1, -1):
-            message = messages[index]
-            if message.get("role") == "tool_results":
-                if not self._completed_tool_results(message):
-                    continue
-            elif message.get("role") == "tool":
-                if message.get("status") not in {"success", "error", "denied"}:
-                    continue
-            else:
-                continue
-            included.append(index)
-            if len(included) >= limit:
-                break
-        return set(included)
 
     @staticmethod
     def _completed_tool_results(message: dict) -> list[dict]:
@@ -541,15 +514,11 @@ class MainWindow(QWidget):
         """Convert session messages to API format, resolving attachment paths."""
         result = []
         messages = self._current_session["messages"]
-        included_tool_indexes = self._included_tool_context_indexes(messages)
-        for index, m in enumerate(messages):
+        for m in messages:
             role = m.get("role")
             if role == "tool_results":
                 results = self._completed_tool_results(m)
                 if not results:
-                    continue
-                if included_tool_indexes is not None and index not in included_tool_indexes:
-                    self._append_api_message(result, "user", self.OMITTED_TOOL_RESULT_TEXT, [])
                     continue
                 content = self._tool_results_context_text(results)
                 attachments = [
@@ -562,9 +531,6 @@ class MainWindow(QWidget):
 
             if role == "tool":
                 if m.get("status") not in {"success", "error", "denied"}:
-                    continue
-                if included_tool_indexes is not None and index not in included_tool_indexes:
-                    self._append_api_message(result, "user", self.OMITTED_TOOL_RESULT_TEXT, [])
                     continue
                 content = self._tool_results_context_text([m])
                 self._append_api_message(result, "user", content, m.get("attachments", []))
@@ -643,6 +609,7 @@ class MainWindow(QWidget):
             "status": message.get("status", "pending"),
             "requiresApproval": message.get("requires_approval", False),
             "expanded": message.get("expanded", message.get("status") == "pending"),
+            "hasDiff": bool(message.get("meta", {}).get("diff")),
         }
 
     def _request_assistant_reply(self):
@@ -729,7 +696,6 @@ class MainWindow(QWidget):
 
         self.input_area.set_streaming(False)
         self._finish_task_timer(True)
-        self._maybe_generate_title()
 
     def _auto_tool_round_limit(self) -> int:
         value = self.settings.get("tools", "auto_tool_round_limit", 8)
@@ -781,6 +747,18 @@ class MainWindow(QWidget):
             return
 
         call = self._tool_queue.pop(0)
+        if call.parse_error:
+            self._append_tool_result(
+                tool_id=uuid.uuid4().hex[:12],
+                tool_name="error",
+                title="格式错误",
+                detail=call.parse_error,
+                status="error",
+                content="",
+                expanded=False,
+            )
+            self._process_next_tool_call()
+            return
         mode = self.tool_runtime.get_mode(call.tool_name)
         if mode == "off":
             self._append_tool_result(
@@ -861,6 +839,7 @@ class MainWindow(QWidget):
                 status=result.status,
                 content=result.content,
                 attachments=result.attachments,
+                meta=result.meta,
                 expanded=False,
             )
             return
@@ -870,6 +849,7 @@ class MainWindow(QWidget):
             status=result.status,
             content=result.content,
             attachments=result.attachments,
+            meta=result.meta,
             requires_approval=False,
             expanded=False,
         )
@@ -911,6 +891,7 @@ class MainWindow(QWidget):
         status: str,
         content: str,
         attachments: list[str] | None = None,
+        meta: dict | None = None,
         requires_approval: bool = False,
         expanded: bool = False,
     ) -> dict:
@@ -924,6 +905,7 @@ class MainWindow(QWidget):
             "content": content,
             "requires_approval": requires_approval,
             "attachments": list(attachments or []),
+            "meta": dict(meta or {}),
             "expanded": expanded,
         }
         self._current_session["messages"].append(message)
@@ -950,6 +932,7 @@ class MainWindow(QWidget):
         status: str,
         content: str,
         attachments: list[str] | None = None,
+        meta: dict | None = None,
         requires_approval: bool = False,
         expanded: bool = False,
     ) -> dict:
@@ -966,6 +949,7 @@ class MainWindow(QWidget):
             "content": content,
             "requires_approval": requires_approval,
             "attachments": list(attachments or []),
+            "meta": dict(meta or {}),
             "expanded": expanded,
         }
         group.setdefault("results", []).append(result)
@@ -1060,6 +1044,28 @@ class MainWindow(QWidget):
                         return result
         return None
 
+    def _show_tool_diff(self, tool_id: str):
+        message = self._find_message_by_tool_id(tool_id)
+        diff = message.get("meta", {}).get("diff") if message else None
+        if not isinstance(diff, dict):
+            return
+        from src.ui.diff_window import DiffWindow
+
+        window = DiffWindow(
+            str(diff.get("path", "")),
+            str(diff.get("before", "")),
+            str(diff.get("after", "")),
+            self.screen(),
+        )
+        self._diff_windows.append(window)
+        window.destroyed.connect(
+            lambda _=None, w=window: self._diff_windows.remove(w)
+            if w in self._diff_windows else None
+        )
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
     def _tool_request_detail(self, call: ToolCall) -> str:
         if call.parse_error:
             return call.parse_error
@@ -1070,18 +1076,8 @@ class MainWindow(QWidget):
             return detail
         if call.tool_name == "search":
             return f"{call.payload.get('path', '')}\n搜索内容: {call.payload.get('pattern', '')}"
-        if call.tool_name in {"write", "add"}:
+        if call.tool_name in {"write", "add", "replace"}:
             return str(call.payload.get("path", ""))
-        if call.tool_name == "replace":
-            replacements = call.payload.get("replacements", [])
-            lines = [str(call.payload.get("path", ""))]
-            for index, item in enumerate(replacements, 1):
-                old = item.get("old", "")
-                new = item.get("new", "")
-                old_preview = old if len(old) <= 120 else old[:120] + "..."
-                new_preview = new if len(new) <= 120 else new[:120] + "..."
-                lines.append(f"\n[{index}] 旧文本:\n{old_preview}\n\n新文本:\n{new_preview}")
-            return "\n".join(lines)
         if call.tool_name == "command":
             return str(call.payload.get("content", ""))
         if call.tool_name == "background":
@@ -1151,9 +1147,9 @@ class MainWindow(QWidget):
             "",
         )
         if user_msg and ai_msg:
-            self._generate_title(user_msg, ai_msg)
+            self._generate_title(user_msg)
 
-    def _generate_title(self, user_msg: str, ai_msg: str):
+    def _generate_title(self, user_msg: str):
         try:
             api_client = self._ensure_api_client()
             model = Settings().get("model", "model_name", "")
@@ -1161,8 +1157,9 @@ class MainWindow(QWidget):
                 return
             from src.api_client import TitleWorker
 
-            worker = TitleWorker(api_client, model, user_msg, ai_msg)
+            worker = TitleWorker(api_client, model, user_msg)
             worker.title_ready.connect(self._on_title_ready)
+            worker.finished.connect(lambda w=worker: self._on_title_worker_finished(w))
             self._title_worker = worker
             worker.start()
         except Exception:
@@ -1171,7 +1168,11 @@ class MainWindow(QWidget):
     def _on_title_ready(self, title: str):
         if self._current_session:
             self._start_title_typing(normalize_session_title(title))
-        self._title_worker = None
+
+    def _on_title_worker_finished(self, worker):
+        if self._title_worker is worker:
+            self._title_worker = None
+        worker.deleteLater()
 
     def _start_title_typing(self, title: str):
         self._stop_title_typing()

@@ -52,7 +52,6 @@ DEFAULT_SETTINGS = {
         "external_prompt_editor_enabled": False,
         "task_complete_notification_enabled": False,
         "task_complete_notification_threshold_seconds": 30,
-        "tool_result_context_limit": 5,
         "github_mirror": "https://v6.gh-proxy.org/",
     },
     "appearance": {

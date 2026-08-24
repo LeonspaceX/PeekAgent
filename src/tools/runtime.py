@@ -510,20 +510,36 @@ class ToolRuntime:
 
     def _write(self, payload: dict[str, str]) -> ToolResult:
         path = self._resolve_path(payload["path"])
+        original = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload["content"], encoding="utf-8")
+        updated = path.read_text(encoding="utf-8", errors="replace")
         detail = str(path)
         content = self._success_content(f"已写入文件：{path}")
-        return ToolResult("write", "success", detail, content)
+        return ToolResult(
+            "write", "success", detail, content,
+            meta={"diff": {"path": str(path), "before": original, "after": updated}},
+        )
 
     def _add(self, payload: dict[str, str]) -> ToolResult:
         path = self._resolve_path(payload["path"])
+        original = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
             f.write(payload["content"])
+        updated = path.read_text(encoding="utf-8", errors="replace")
         detail = str(path)
         content = self._success_content(f"已在文件末尾追加内容：{path}")
-        return ToolResult("add", "success", detail, content)
+        return ToolResult(
+            "add", "success", detail, content,
+            meta={
+                "diff": {
+                    "path": str(path),
+                    "before": original,
+                    "after": updated,
+                }
+            },
+        )
 
     def _replace(self, payload: dict[str, Any]) -> ToolResult:
         path = self._resolve_path(payload["path"])
@@ -552,7 +568,10 @@ class ToolRuntime:
         path.write_text(new_text, encoding="utf-8")
         detail = str(path)
         content = self._success_content(f"已精确替换文件内容：{path}\n共执行 {len(replacements)} 组替换")
-        return ToolResult("replace", "success", detail, content)
+        return ToolResult(
+            "replace", "success", detail, content,
+            meta={"diff": {"path": str(path), "before": original, "after": new_text}},
+        )
 
     def _command(self, payload: dict[str, Any]) -> ToolResult:
         output_limit = self.get_command_output_limit()

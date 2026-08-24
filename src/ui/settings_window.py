@@ -41,7 +41,7 @@ from src.startup_manager import request_auto_start_update
 
 class _AsyncWorker(QThread):
     """Generic worker that runs a callable in a background thread."""
-    finished = Signal(object)  # result
+    result_ready = Signal(object)
     errored = Signal(str)
 
     def __init__(self, fn, parent=None):
@@ -51,7 +51,7 @@ class _AsyncWorker(QThread):
     def run(self):
         try:
             result = self._fn()
-            self.finished.emit(result)
+            self.result_ready.emit(result)
         except Exception as e:
             self.errored.emit(str(e))
 
@@ -261,13 +261,15 @@ class SettingsWindow(QWidget):
         self._model_channels: list[dict] = []
         self._editing_channel_index = 0
         self._active_channel_index = 0
+        self._background_workers: list[QThread] = []
+        self._prompt_loaded = False
         self.setObjectName("settingsWindow")
         self.setWindowTitle("PeekAgent 设置")
         self.setWindowFlags(Qt.WindowType.Window)
         self.resize(600, 450)
         self._init_ui()
         self._load_values()
-        self.apply_theme()
+        self.apply_theme(refresh_preview=False)
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
@@ -297,6 +299,8 @@ class SettingsWindow(QWidget):
 
     def _switch_page(self, index: int):
         self.stack.setCurrentIndex(index)
+        if index == 6:
+            self._load_prompt_files()
         if index == 7:
             self._maybe_check_update()
 
@@ -309,7 +313,7 @@ class SettingsWindow(QWidget):
         scroll.setWidget(page)
         return scroll
 
-    def apply_theme(self, dark_mode: bool | None = None):
+    def apply_theme(self, dark_mode: bool | None = None, refresh_preview: bool = True):
         dark_mode = isDarkTheme() if dark_mode is None else dark_mode
         window_bg = "#202020" if dark_mode else "#fafafa"
         text_color = "#f3f3f3" if dark_mode else "#202020"
@@ -338,7 +342,8 @@ class SettingsWindow(QWidget):
                 border-color: {border_color};
             }}
         """)
-        self.highlight_preview.apply_theme(dark_mode)
+        if refresh_preview:
+            self.highlight_preview.apply_theme(dark_mode)
         self._apply_native_title_bar_theme(dark_mode)
         self.update()
 
@@ -400,12 +405,6 @@ class SettingsWindow(QWidget):
         self.task_complete_notification_switch.checkedChanged.connect(
             self._update_task_notification_threshold_enabled
         )
-
-        self.tool_result_context_limit_edit = LineEdit(self)
-        self.tool_result_context_limit_edit.setPlaceholderText("5，0 为不限制")
-        self.tool_result_context_limit_edit.setToolTip("按 <tool_calls> 块计数；0 或 1000000 及以上表示不限制。")
-        self.tool_result_context_limit_edit.setValidator(QIntValidator(0, 2147483647, self))
-        form.addRow("工具调用结果携带数:", self.tool_result_context_limit_edit)
 
         self.github_mirror_edit = LineEdit(self)
         self.github_mirror_edit.setPlaceholderText("留空则直连 GitHub")
@@ -531,9 +530,6 @@ class SettingsWindow(QWidget):
     @staticmethod
     def _color_picker_value(button: ColorPickerButton) -> str:
         return QColor(button.color).name()
-
-    def _refresh_highlight_preview(self):
-        self.highlight_preview.apply_highlight_theme()
 
     def _theme_mode_value(self) -> str:
         return {
@@ -1043,9 +1039,6 @@ class SettingsWindow(QWidget):
 
         self.system_prompt_edit = PlainTextEdit(self)
         self.system_prompt_edit.setPlaceholderText("输入系统提示词...")
-        system_path = PROMPT_DIR / "SYSTEM.md"
-        if system_path.exists():
-            self.system_prompt_edit.setPlainText(system_path.read_text(encoding="utf-8"))
         layout.addWidget(self.system_prompt_edit, 1)
 
         layout.addWidget(SubtitleLabel("记忆提示"))
@@ -1053,9 +1046,6 @@ class SettingsWindow(QWidget):
 
         self.memory_prompt_edit = PlainTextEdit(self)
         self.memory_prompt_edit.setPlaceholderText("输入记忆内容...")
-        memory_path = PROMPT_DIR / "MEMORY.md"
-        if memory_path.exists():
-            self.memory_prompt_edit.setPlainText(memory_path.read_text(encoding="utf-8"))
         layout.addWidget(self.memory_prompt_edit, 1)
 
         prompt_options = QFormLayout()
@@ -1078,6 +1068,17 @@ class SettingsWindow(QWidget):
         layout.addWidget(save_btn)
 
         return page
+
+    def _load_prompt_files(self):
+        if self._prompt_loaded:
+            return
+        system_path = PROMPT_DIR / "SYSTEM.md"
+        memory_path = PROMPT_DIR / "MEMORY.md"
+        if system_path.exists():
+            self.system_prompt_edit.setPlainText(system_path.read_text(encoding="utf-8"))
+        if memory_path.exists():
+            self.memory_prompt_edit.setPlainText(memory_path.read_text(encoding="utf-8"))
+        self._prompt_loaded = True
 
     def _save_prompt(self):
         PROMPT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1123,8 +1124,9 @@ class SettingsWindow(QWidget):
         self._update_check_in_flight = True
         self.update_btn.hide()
         self._update_check_worker = _AsyncWorker(fetch_latest_release_info, self)
-        self._update_check_worker.finished.connect(self._on_update_check_finished)
+        self._update_check_worker.result_ready.connect(self._on_update_check_finished)
         self._update_check_worker.errored.connect(self._on_update_check_failed)
+        self._track_background_worker(self._update_check_worker)
         self._update_check_worker.start()
 
     def _on_update_check_finished(self, release_info: ReleaseInfo):
@@ -1230,9 +1232,6 @@ class SettingsWindow(QWidget):
                 str(s.get("general", "task_complete_notification_threshold_seconds", 30))
             )
             self._update_task_notification_threshold_enabled()
-            self.tool_result_context_limit_edit.setText(
-                str(s.get("general", "tool_result_context_limit", 5))
-            )
             self.github_mirror_edit.setText(s.get("general", "github_mirror", "https://v6.gh-proxy.org/"))
 
             self._set_color_picker_value(
@@ -1254,8 +1253,6 @@ class SettingsWindow(QWidget):
                 s.get("appearance", "theme_color_2", "#7c3aed"),
                 "#7c3aed",
             )
-            self._refresh_highlight_preview()
-
             self._load_model_channels_from_settings()
             self._load_channel_to_form(self._active_channel_index)
             self._refresh_channel_controls()
@@ -1299,7 +1296,6 @@ class SettingsWindow(QWidget):
             self._task_complete_notification_threshold_value(),
             save=False,
         )
-        s.set("general", "tool_result_context_limit", self._tool_result_context_limit_value(), save=False)
         s.set("general", "github_mirror", self.github_mirror_edit.text().strip(), save=False)
 
         s.set("appearance", "theme_mode", self._theme_mode_value(), save=False)
@@ -1437,8 +1433,9 @@ class SettingsWindow(QWidget):
             return response.json()
 
         self._tavily_usage_worker = _AsyncWorker(do_fetch, self)
-        self._tavily_usage_worker.finished.connect(self._on_tavily_usage_fetched)
+        self._tavily_usage_worker.result_ready.connect(self._on_tavily_usage_fetched)
         self._tavily_usage_worker.errored.connect(self._on_tavily_usage_error)
+        self._track_background_worker(self._tavily_usage_worker)
         self._tavily_usage_worker.start()
 
     def _on_tavily_usage_fetched(self, data):
@@ -1472,6 +1469,14 @@ class SettingsWindow(QWidget):
         self.settings_saved.emit()
         super().closeEvent(event)
 
+    def _track_background_worker(self, worker: QThread):
+        self._background_workers.append(worker)
+        worker.finished.connect(lambda w=worker: self._on_background_worker_finished(w))
+
+    def _on_background_worker_finished(self, worker: QThread):
+        if worker in self._background_workers:
+            self._background_workers.remove(worker)
+
     def _fetch_models(self):
         channel = self._active_channel_for_request()
         url = channel.get("endpoint_url", "").strip().rstrip("/")
@@ -1488,8 +1493,9 @@ class SettingsWindow(QWidget):
             return client.fetch_models()
 
         self._fetch_worker = _AsyncWorker(do_fetch, self)
-        self._fetch_worker.finished.connect(self._on_models_fetched)
+        self._fetch_worker.result_ready.connect(self._on_models_fetched)
         self._fetch_worker.errored.connect(self._on_models_error)
+        self._track_background_worker(self._fetch_worker)
         self._fetch_worker.start()
 
     def _on_models_fetched(self, models):
@@ -1535,8 +1541,9 @@ class SettingsWindow(QWidget):
             return client.test_connection(model)
 
         self._test_worker = _AsyncWorker(do_test, self)
-        self._test_worker.finished.connect(self._on_test_ok)
+        self._test_worker.result_ready.connect(self._on_test_ok)
         self._test_worker.errored.connect(self._on_test_error)
+        self._track_background_worker(self._test_worker)
         self._test_worker.start()
 
     def _on_test_ok(self, ms):
@@ -1633,17 +1640,6 @@ class SettingsWindow(QWidget):
         except ValueError:
             return 30
         return max(1, value)
-
-    def _tool_result_context_limit_value(self) -> int:
-        text = self.tool_result_context_limit_edit.text().strip()
-        if not text:
-            return 5
-        try:
-            value = int(text)
-        except ValueError:
-            return 5
-        value = max(0, value)
-        return 0 if value >= 1000000 else value
 
     @staticmethod
     def _format_tavily_usage_value(value) -> str:

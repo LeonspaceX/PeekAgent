@@ -20,6 +20,7 @@ class _ChatBridge(QObject):
     regenerateRequested = Signal(int)
     toolApprovalRequested = Signal(str, bool)
     loadOlderRequested = Signal()
+    diffRequested = Signal(str)
 
     @Slot(int)
     def copyMessage(self, index: int):
@@ -44,6 +45,10 @@ class _ChatBridge(QObject):
     @Slot()
     def loadOlderMessages(self):
         self.loadOlderRequested.emit()
+
+    @Slot(str)
+    def showDiff(self, tool_id: str):
+        self.diffRequested.emit(tool_id)
 
 
 class _ChatPage(QWebEnginePage):
@@ -70,6 +75,7 @@ class ChatView(QWebEngineView):
     regenerate_requested = Signal(int)
     tool_approval_requested = Signal(str, bool)
     load_older_requested = Signal()
+    diff_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -90,6 +96,7 @@ class ChatView(QWebEngineView):
         self._bridge.regenerateRequested.connect(self.regenerate_requested)
         self._bridge.toolApprovalRequested.connect(self.tool_approval_requested)
         self._bridge.loadOlderRequested.connect(self.load_older_requested)
+        self._bridge.diffRequested.connect(self.diff_requested)
         # Prevent flicker when parent has WA_TranslucentBackground
         self.page().setBackgroundColor(QColor("#181818") if self._dark_mode else QColor(255, 255, 255))
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -112,6 +119,7 @@ class ChatView(QWebEngineView):
             "copy": self._icon_data_uri(FluentIcon.COPY),
             "refresh": self._icon_data_uri(FluentIcon.SYNC),
             "check": self._icon_data_uri(FluentIcon.ACCEPT_MEDIUM),
+            "diff": self._icon_data_uri(FluentIcon.CODE),
             "tool_read": self._icon_data_uri(FluentIcon.DOCUMENT),
             "tool_search": self._icon_data_uri(FluentIcon.SEARCH),
             "tool_write": self._icon_data_uri(FluentIcon.EDIT),
@@ -128,6 +136,7 @@ class ChatView(QWebEngineView):
             "tool_client_command": self._icon_data_uri(FluentIcon.DEVELOPER_TOOLS),
             "tool_client_disconnect": self._icon_data_uri(FluentIcon.CANCEL_MEDIUM),
             "tool_weather": self._icon_data_uri(FluentIcon.CLOUD),
+            "tool_error": self._icon_data_uri(FluentIcon.CANCEL_MEDIUM),
         }
         return f"setActionIcons({json.dumps(icons, ensure_ascii=False)});"
 

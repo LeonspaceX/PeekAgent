@@ -421,8 +421,10 @@ body {
 }
 
 .tool-detail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-top: 8px;
-  white-space: pre-wrap;
   line-height: 1.5;
   color: var(--tool-detail-color);
   font-size: 12.5px;
@@ -431,6 +433,44 @@ body {
   overflow-wrap: anywhere;
   word-break: break-word;
   overflow-x: auto;
+}
+
+.tool-detail-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.tool-diff-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--tool-card-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--primary-color);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tool-diff-button:hover {
+  background: var(--tool-card-hover);
+  border-color: color-mix(in srgb, var(--primary-color) 35%, transparent);
+}
+
+.tool-diff-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent);
+  outline-offset: 1px;
+}
+
+.tool-diff-button img {
+  width: 14px;
+  height: 14px;
 }
 
 .tool-approval {
@@ -677,6 +717,9 @@ function setHighlightTheme(theme) {
 }
 
 function toolIconKey(toolName) {
+  if (toolName === 'error') {
+    return 'tool_error';
+  }
   return 'tool_' + toolName;
 }
 
@@ -852,7 +895,28 @@ function createToolCard(payload) {
 
   const detail = document.createElement('div');
   detail.className = 'tool-detail';
-  detail.textContent = payload.detail || '';
+  const detailText = document.createElement('span');
+  detailText.className = 'tool-detail-text';
+  detailText.textContent = payload.detail || '';
+  detail.appendChild(detailText);
+  if (payload.hasDiff) {
+    const diffButton = document.createElement('button');
+    diffButton.className = 'tool-diff-button';
+    diffButton.type = 'button';
+    diffButton.title = '查看更改';
+    const diffIcon = document.createElement('img');
+    diffIcon.src = actionIcons.diff || '';
+    diffIcon.alt = '';
+    diffButton.appendChild(diffIcon);
+    const diffLabel = document.createElement('span');
+    diffLabel.textContent = '查看更改';
+    diffButton.appendChild(diffLabel);
+    diffButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      callBridge('showDiff', payload.id);
+    });
+    detail.appendChild(diffButton);
+  }
   body.appendChild(detail);
 
   if (payload.requiresApproval && payload.status === 'pending') {

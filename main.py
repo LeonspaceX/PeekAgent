@@ -226,7 +226,7 @@ class PeekAgentApp:
     def _open_settings(self):
         if self._shutting_down:
             return
-        if self.settings_window is None or not self.settings_window.isVisible():
+        if self.settings_window is None:
             from src.ui.settings_window import SettingsWindow
 
             self.settings_window = SettingsWindow()
@@ -237,7 +237,6 @@ class PeekAgentApp:
             self.settings_window.reset_window_requested.connect(
                 self.main_window.reset_geometry_to_default
             )
-            self.settings_window.apply_theme(isDarkTheme())
         self._show_and_activate_window(self.settings_window)
 
     def _apply_theme(self):
